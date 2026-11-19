@@ -1,0 +1,3469 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <title>Paw & Pawn: Dark Chess · 楚漢暗棋演武（台灣標準競技版）</title>
+  <style>
+    :root {
+      --sat: env(safe-area-inset-top, 0px);
+      --sab: env(safe-area-inset-bottom, 0px);
+      --sal: env(safe-area-inset-left, 0px);
+      --sar: env(safe-area-inset-right, 0px);
+    }
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      height: 100dvh;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background-color: #2b180e;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Heiti TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+      touch-action: none;
+      -webkit-text-size-adjust: 100%;
+    }
+    #app {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding-top: max(6px, var(--sat));
+      padding-bottom: max(8px, var(--sab));
+      padding-left: max(6px, var(--sal));
+      padding-right: max(6px, var(--sar));
+      background: radial-gradient(circle at center, #452817 0%, #1f1108 100%);
+    }
+    canvas {
+      display: block;
+      touch-action: none;
+      border-radius: 18px;
+      box-shadow: 0 10px 36px rgba(0, 0, 0, 0.78);
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <canvas id="gameCanvas"></canvas>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  // 安全防護：確保 Canvas arc 與 ellipse 半徑永遠 >= 0.1，避免任何瀏覽器拋出 IndexSizeError
+  if (typeof CanvasRenderingContext2D !== 'undefined') {
+    const origArc = CanvasRenderingContext2D.prototype.arc;
+    CanvasRenderingContext2D.prototype.arc = function(x, y, r, sAngle, eAngle, counterclockwise) {
+      return origArc.call(this, x, y, Math.max(0.1, r || 0.1), sAngle, eAngle, counterclockwise);
+    };
+    if (CanvasRenderingContext2D.prototype.ellipse) {
+      const origEllipse = CanvasRenderingContext2D.prototype.ellipse;
+      CanvasRenderingContext2D.prototype.ellipse = function(x, y, rx, ry, rot, sAngle, eAngle, ccw) {
+        return origEllipse.call(this, x, y, Math.max(0.1, rx || 0.1), Math.max(0.1, ry || 0.1), rot, sAngle, eAngle, ccw);
+      };
+    }
+  }
+
+  // =========================================================================
+  // 1. Web Audio 寫實貓咪與軍武音效合成引擎 (無外部檔案、支援靜音與點擊解鎖)
+  // =========================================================================
+  class SoundEngine {
+    constructor() {
+      this.ctx = null;
+      this.muted = false;
+      this.unlocked = false;
+    }
+
+    unlock() {
+      if (!this.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          this.ctx = new AudioCtx();
+        }
+      }
+      if (this.ctx && this.ctx.state === 'suspended') {
+        this.ctx.resume();
+      }
+      this.unlocked = true;
+    }
+
+    toggleMute() {
+      this.muted = !this.muted;
+      return this.muted;
+    }
+
+    playTone(freq, type, duration, vol = 0.2, slideFreq = null, delay = 0) {
+      if (this.muted || !this.ctx) return;
+      const now = this.ctx.currentTime + delay;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, now);
+      if (slideFreq) {
+        osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideFreq), now + duration);
+      }
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(vol, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + duration + 0.02);
+    }
+
+    playNoise(duration, vol = 0.25, filterFreq = 1000, delay = 0) {
+      if (this.muted || !this.ctx) return;
+      const now = this.ctx.currentTime + delay;
+      const bufferSize = Math.floor(this.ctx.sampleRate * duration);
+      const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = Math.random() * 2 - 1;
+      }
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = buffer;
+
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(filterFreq, now);
+      filter.frequency.exponentialRampToValueAtTime(100, now + duration);
+
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(vol, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.ctx.destination);
+      noise.start(now);
+      noise.stop(now + duration + 0.02);
+    }
+
+    playMeow(pitch = 620, delay = 0) {
+      if (this.muted || !this.ctx) return;
+      const now = this.ctx.currentTime + delay;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(pitch * 0.85, now);
+      osc.frequency.linearRampToValueAtTime(pitch * 1.25, now + 0.07);
+      osc.frequency.exponentialRampToValueAtTime(pitch * 0.72, now + 0.22);
+
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.18, now + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.23);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.25);
+    }
+
+    playSelect() {
+      this.playMeow(660, 0);
+    }
+
+    playCancel() {
+      this.playTone(420, 'triangle', 0.1, 0.14, 290);
+    }
+
+    playInvalid() {
+      this.playTone(190, 'sawtooth', 0.15, 0.18, 130);
+    }
+
+    playRpsSwing() {
+      this.playTone(330, 'triangle', 0.1, 0.22, 440, 0.0);
+      this.playTone(330, 'triangle', 0.1, 0.22, 440, 0.22);
+      this.playTone(490, 'triangle', 0.14, 0.28, 660, 0.44);
+    }
+
+    playRpsResult(result) {
+      if (result === 'WIN') {
+        this.playTone(523.25, 'triangle', 0.15, 0.26, 659.25, 0);
+        this.playTone(783.99, 'triangle', 0.25, 0.28, 1046.5, 0.12);
+        this.playMeow(760, 0.15);
+      } else if (result === 'LOSE') {
+        this.playTone(392, 'sawtooth', 0.18, 0.18, 330, 0);
+        this.playTone(293.66, 'sawtooth', 0.25, 0.18, 220, 0.15);
+      } else {
+        this.playTone(440, 'sine', 0.12, 0.22, 440, 0);
+        this.playTone(440, 'sine', 0.15, 0.22, 490, 0.14);
+      }
+    }
+
+    playFlip() {
+      this.playTone(320, 'sine', 0.08, 0.28, 720);
+      this.playNoise(0.05, 0.18, 1600);
+      this.playMeow(700, 0.05);
+    }
+
+    playMove() {
+      this.playTone(210, 'sine', 0.09, 0.34, 70);
+      this.playNoise(0.05, 0.16, 950);
+    }
+
+    playBattle(pieceType) {
+      this.playMeow(740, 0);
+      switch (pieceType) {
+        case 'C':
+          this.playNoise(0.15, 0.16, 3200, 0.05);
+          this.playNoise(0.55, 0.45, 620, 0.22);
+          this.playTone(135, 'sawtooth', 0.45, 0.38, 30, 0.22);
+          this.playNoise(0.45, 0.18, 1800, 0.55);
+          break;
+        case 'R':
+          this.playTone(120, 'sawtooth', 0.25, 0.28, 220, 0.02);
+          this.playNoise(0.35, 0.38, 1300, 0.22);
+          this.playTone(280, 'triangle', 0.38, 0.32, 920, 0.25);
+          break;
+        case 'H':
+          this.playTone(540, 'sawtooth', 0.18, 0.22, 340, 0.04);
+          this.playNoise(0.28, 0.32, 1600, 0.22);
+          this.playTone(180, 'sine', 0.3, 0.36, 48, 0.22);
+          break;
+        case 'E':
+          this.playTone(160, 'sawtooth', 0.25, 0.24, 95, 0.04);
+          this.playTone(90, 'sine', 0.5, 0.48, 26, 0.2);
+          this.playNoise(0.38, 0.35, 480, 0.2);
+          break;
+        case 'A':
+          this.playTone(1050, 'sawtooth', 0.12, 0.22, 1550, 0.08);
+          this.playTone(1320, 'triangle', 0.18, 0.24, 580, 0.18);
+          this.playNoise(0.2, 0.24, 3000, 0.2);
+          break;
+        case 'K':
+          this.playTone(210, 'sawtooth', 0.4, 0.35, 75, 0.06);
+          this.playTone(420, 'square', 0.32, 0.24, 95, 0.12);
+          this.playNoise(0.35, 0.3, 1100, 0.2);
+          break;
+        default:
+          this.playTone(390, 'square', 0.12, 0.22, 780, 0.06);
+          this.playNoise(0.22, 0.28, 2100, 0.16);
+          break;
+      }
+    }
+
+    playWin() {
+      const melody = [523.25, 659.25, 783.99, 1046.50, 783.99, 1046.50];
+      const times = [0, 0.12, 0.24, 0.38, 0.55, 0.70];
+      melody.forEach((f, i) => {
+        this.playTone(f, 'triangle', 0.28, 0.26, null, times[i]);
+      });
+      this.playMeow(780, 0.75);
+    }
+
+    playLose() {
+      const melody = [440, 392, 349.23, 293.66, 220];
+      melody.forEach((f, i) => {
+        this.playTone(f, 'sawtooth', 0.28, 0.18, f * 0.92, i * 0.16);
+      });
+    }
+
+    playDraw() {
+      const melody = [392, 440, 392, 523.25];
+      melody.forEach((f, i) => {
+        this.playTone(f, 'triangle', 0.22, 0.20, null, i * 0.14);
+      });
+    }
+  }
+
+  const sfx = new SoundEngine();
+
+  // =========================================================================
+  // 2. 台灣暗棋（半棋 / 翻棋）官方與標準競技規則設定
+  // =========================================================================
+  const SIDE_RED = 'R';   // 漢 (赤虎橘貓軍團)
+  const SIDE_BLACK = 'B'; // 楚 (玄豹黑貓軍團)
+
+  const ROWS = 8;
+  const COLS = 4;
+  const MAX_IDLE_MOVES = 50; // 台灣標準競技規則：連續 50 步無翻棋且無吃子判和局
+  const MAX_CHASE_COUNT = 5; // 台灣標準競技規則：禁止連續長捉超過 5 次
+
+  const PIECE_LABELS = {
+    R: { K: '帥', A: '仕', E: '相', R: '俥', H: '傌', C: '炮', P: '兵' },
+    B: { K: '將', A: '士', E: '象', R: '車', H: '馬', C: '包', P: '卒' }
+  };
+
+  const PIECE_TITLES = {
+    K: 'Lv.7 金冠大元帥',
+    A: 'Lv.6 雙刀護衛貓',
+    E: 'Lv.5 重裝戰象貓',
+    R: 'Lv.4 裝甲戰車貓',
+    H: 'Lv.3 重甲騎兵貓',
+    C: 'Lv.2 飛炮火砲貓',
+    P: 'Lv.1 弒帥先鋒貓'
+  };
+
+  const DARK_RANKS = {
+    K: 7,
+    A: 6,
+    E: 5,
+    R: 4,
+    H: 3,
+    C: 2,
+    P: 1
+  };
+
+  const PIECE_VALUES = {
+    K: 950, A: 520, E: 360, R: 240, H: 150, C: 380, P: 180
+  };
+
+  const BATTLE_MOVES = {
+    K: ['皇極虎嘯震天波！', '霸王金印鎮四方！'],
+    A: ['寒光雙刃十字斬！', '御前護衛旋風擊！'],
+    E: ['巨象長鼻洪水狂噴！', '怒濤象鼻高壓水龍捲！'],
+    H: ['飛馬神腿霸王旋風踢！', '鐵蹄伸腿連環踢飛！'],
+    R: ['裝甲戰車全速撞飛！', '重型履帶狂飆突擊！'],
+    C: ['隔山飛炮烈焰轟炸！', '高爆砲彈焦黑化灰！'],
+    P: ['小兵立大功穿雲刺！', '先鋒突擊破陣斬！']
+  };
+
+  const RPS_INFO = {
+    SCISSORS: { icon: '✌️', name: '剪刀' },
+    ROCK:     { icon: '✊', name: '石頭' },
+    PAPER:    { icon: '🖐️', name: '布' }
+  };
+
+  function createInitialDarkBoard() {
+    const counts = [
+      { type: 'K', count: 1 },
+      { type: 'A', count: 2 },
+      { type: 'E', count: 2 },
+      { type: 'R', count: 2 },
+      { type: 'H', count: 2 },
+      { type: 'C', count: 2 },
+      { type: 'P', count: 5 }
+    ];
+    const pool = [];
+    let nextId = 1;
+    for (const side of [SIDE_RED, SIDE_BLACK]) {
+      for (const item of counts) {
+        for (let i = 0; i < item.count; i++) {
+          pool.push({ id: nextId++, side, type: item.type, revealed: false });
+        }
+      }
+    }
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = pool[i];
+      pool[i] = pool[j];
+      pool[j] = tmp;
+    }
+
+    const b = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+    let idx = 0;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        b[r][c] = pool[idx++];
+      }
+    }
+    return b;
+  }
+
+  function cloneBoard(board) {
+    return board.map(row => row.map(cell => (cell ? { ...cell } : null)));
+  }
+
+  function inBounds(r, c) {
+    return r >= 0 && r < ROWS && c >= 0 && c < COLS;
+  }
+
+  // 台灣標準競技規則：判斷單步鄰格是否可吃（不含炮的隔山跳吃）
+  function canRegularCapture(attackerType, defenderType) {
+    if (attackerType === 'C') return false; // 炮不可直接吃相鄰棋子（含敵方炮/包）
+    if (attackerType === 'K' && defenderType === 'P') return false; // 帥/將不可吃兵/卒
+    if (attackerType === 'P' && defenderType === 'K') return true;  // 兵/卒可吃帥/將
+    // 炮/包(2) > 兵/卒(1)，故兵/卒(1) 不可吃 炮/包(2)
+    return DARK_RANKS[attackerType] >= DARK_RANKS[defenderType];
+  }
+
+  function getThreatenedEnemyIdsAfterMove(board, fr, fc, tr, tc) {
+    const piece = board[fr][fc];
+    if (!piece) return [];
+    const temp = cloneBoard(board);
+    temp[tr][tc] = temp[fr][fc];
+    temp[fr][fc] = null;
+
+    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    const ids = [];
+
+    if (piece.type !== 'C') {
+      for (const [dr, dc] of dirs) {
+        const nr = tr + dr, nc = tc + dc;
+        if (!inBounds(nr, nc)) continue;
+        const target = temp[nr][nc];
+        if (target && target.revealed && target.side !== piece.side && canRegularCapture(piece.type, target.type)) {
+          ids.push(target.id);
+        }
+      }
+    } else {
+      for (const [dr, dc] of dirs) {
+        let nr = tr + dr, nc = tc + dc;
+        let screens = 0;
+        while (inBounds(nr, nc)) {
+          const cell = temp[nr][nc];
+          if (cell) {
+            if (screens === 0) screens = 1;
+            else {
+              if (cell.revealed && cell.side !== piece.side) ids.push(cell.id);
+              break;
+            }
+          }
+          nr += dr;
+          nc += dc;
+        }
+      }
+    }
+    return ids;
+  }
+
+  function getLegalMovesForPiece(board, r, c, enforceChaseRule = true) {
+    const p = board[r][c];
+    if (!p || !p.revealed) return [];
+    const rawMoves = [];
+    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr, nc = c + dc;
+      if (!inBounds(nr, nc)) continue;
+      const target = board[nr][nc];
+      if (!target) {
+        const threatenedIds = getThreatenedEnemyIdsAfterMove(board, r, c, nr, nc);
+        rawMoves.push({ type: 'MOVE', fr: r, fc: c, tr: nr, tc: nc, threatenedIds });
+      } else if (target.revealed && target.side !== p.side) {
+        if (canRegularCapture(p.type, target.type)) {
+          rawMoves.push({ type: 'CAPTURE', fr: r, fc: c, tr: nr, tc: nc });
+        }
+      }
+    }
+
+    // 炮/包：隔著任意一顆棋子（明棋或暗棋皆可作炮架），直線跳吃任意已翻開的敵棋
+    if (p.type === 'C') {
+      for (const [dr, dc] of dirs) {
+        let nr = r + dr, nc = c + dc;
+        let screenPos = null;
+        while (inBounds(nr, nc)) {
+          const cell = board[nr][nc];
+          if (cell) {
+            if (!screenPos) {
+              screenPos = { r: nr, c: nc };
+            } else {
+              if (cell.revealed && cell.side !== p.side) {
+                rawMoves.push({
+                  type: 'CAPTURE',
+                  fr: r, fc: c,
+                  tr: nr, tc: nc,
+                  screenPos
+                });
+              }
+              break;
+            }
+          }
+          nr += dr;
+          nc += dc;
+        }
+      }
+    }
+
+    // 台灣標準競技規則：禁止長捉
+    if (enforceChaseRule && state.chaseTracker && state.chaseTracker[p.side]) {
+      const ct = state.chaseTracker[p.side];
+      if (ct.chaserId === p.id && ct.count >= MAX_CHASE_COUNT) {
+        const filtered = rawMoves.filter(m => {
+          if (m.type !== 'MOVE') return true;
+          return !(m.threatenedIds && m.threatenedIds.includes(ct.targetId));
+        });
+        if (filtered.length > 0) return filtered;
+      }
+    }
+
+    return rawMoves;
+  }
+
+  function getAllLegalActions(board, side) {
+    const actions = [];
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const p = board[r][c];
+        if (!p) continue;
+        if (!p.revealed) {
+          actions.push({ type: 'FLIP', r, c });
+        } else if (p.side === side) {
+          const pm = getLegalMovesForPiece(board, r, c);
+          for (const m of pm) actions.push(m);
+        }
+      }
+    }
+    return actions;
+  }
+
+  function countRemainingPieces(board, side) {
+    let count = 0;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const p = board[r][c];
+        if (p && p.side === side) count++;
+      }
+    }
+    return count;
+  }
+
+  function countUnrevealedPieces(board) {
+    let count = 0;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const p = board[r][c];
+        if (p && !p.revealed) count++;
+      }
+    }
+    return count;
+  }
+
+  function isSquareThreatened(board, r, c, mySide, myType) {
+    const enemySide = mySide === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr, nc = c + dc;
+      if (!inBounds(nr, nc)) continue;
+      const ep = board[nr][nc];
+      if (ep && ep.revealed && ep.side === enemySide) {
+        if (canRegularCapture(ep.type, myType)) return true;
+      }
+    }
+
+    for (const [dr, dc] of dirs) {
+      let nr = r + dr, nc = c + dc;
+      let screenCount = 0;
+      while (inBounds(nr, nc)) {
+        const cell = board[nr][nc];
+        if (cell) {
+          if (screenCount === 0) {
+            screenCount = 1;
+          } else {
+            if (cell.revealed && cell.side === enemySide && cell.type === 'C') {
+              return true;
+            }
+            break;
+          }
+        }
+        nr += dr;
+        nc += dc;
+      }
+    }
+    return false;
+  }
+
+  function getCannotCaptureReason(board, fr, fc, tr, tc) {
+    const atk = board[fr][fc];
+    const def = board[tr][tc];
+    if (!atk || !def) return '';
+
+    if (!def.revealed) {
+      if (atk.type === 'C') {
+        return '⚠️ 台灣標準規則：炮/包不可盲吃蓋住的暗棋（暗棋僅能當炮架）！';
+      }
+      return '⚠️ 台灣標準規則：不可直接吃未翻開的暗棋！';
+    }
+
+    const dr = Math.abs(fr - tr);
+    const dc = Math.abs(fc - tc);
+    const isAdjacent = (dr + dc === 1);
+
+    if (atk.type === 'C') {
+      if (isAdjacent) {
+        return '⚠️ 炮/包規則：不可直接吃相鄰棋子（含敵方炮/包），必須隔一子跳吃！';
+      }
+      if (fr !== tr && fc !== tc) {
+        return '⚠️ 炮/包規則：必須在同一橫列或直行才能跳吃！';
+      }
+      return '⚠️ 炮/包規則：直線中間必須「剛好隔一顆棋子（炮架）」才能跳吃！';
+    }
+
+    if (!isAdjacent) {
+      return '⚠️ 走步規則：除炮/包跳吃外，其餘棋子每次僅限走或吃相鄰一格！';
+    }
+
+    if (atk.type === 'K' && def.type === 'P') {
+      return `⚠️ 帥兵相剋：【${PIECE_LABELS[atk.side].K}(Lv.7)】不可吃【${PIECE_LABELS[def.side].P}(Lv.1)】！`;
+    }
+
+    if (atk.type === 'P' && def.type === 'C') {
+      return `⚠️ 台灣標準階級：【${PIECE_LABELS[def.side].C}(Lv.2)】大於【${PIECE_LABELS[atk.side].P}(Lv.1)】，兵卒不可吃炮！`;
+    }
+
+    return `⚠️ 階級不足：【${PIECE_LABELS[atk.side][atk.type]}(Lv.${DARK_RANKS[atk.type]})】無法吃【${PIECE_LABELS[def.side][def.type]}(Lv.${DARK_RANKS[def.type]})】！`;
+  }
+
+  // =========================================================================
+  // 3. 智慧暗棋 AI 決策系統
+  // =========================================================================
+  function getBestAIDarkAction(board, aiSide, difficulty) {
+    if (!aiSide) {
+      const flips = [];
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (board[r][c] && !board[r][c].revealed) {
+            flips.push({ type: 'FLIP', r, c });
+          }
+        }
+      }
+      return flips[Math.floor(Math.random() * flips.length)] || null;
+    }
+
+    const actions = getAllLegalActions(board, aiSide);
+    if (actions.length === 0) return null;
+
+    let bestScore = -Infinity;
+    let bestActions = [];
+
+    for (const act of actions) {
+      let score = 0;
+
+      if (act.type === 'CAPTURE') {
+        const atk = board[act.fr][act.fc];
+        const def = board[act.tr][act.tc];
+        const targetVal = PIECE_VALUES[def.type] || 150;
+        const myVal = PIECE_VALUES[atk.type] || 150;
+
+        score += 320 + targetVal * 1.35;
+        if (atk.type === 'P' && def.type === 'K') score += 650;
+
+        const tempBoard = cloneBoard(board);
+        tempBoard[act.tr][act.tc] = tempBoard[act.fr][act.fc];
+        tempBoard[act.fr][act.fc] = null;
+
+        if (difficulty === 'hard' && isSquareThreatened(tempBoard, act.tr, act.tc, aiSide, atk.type)) {
+          score -= myVal * 0.95;
+        }
+
+      } else if (act.type === 'MOVE') {
+        const atk = board[act.fr][act.fc];
+        const myVal = PIECE_VALUES[atk.type] || 150;
+        const currentlyInDanger = isSquareThreatened(board, act.fr, act.fc, aiSide, atk.type);
+
+        const tempBoard = cloneBoard(board);
+        tempBoard[act.tr][act.tc] = tempBoard[act.fr][act.fc];
+        tempBoard[act.fr][act.fc] = null;
+        const nextInDanger = isSquareThreatened(tempBoard, act.tr, act.tc, aiSide, atk.type);
+
+        if (currentlyInDanger && !nextInDanger) {
+          score += 240 + myVal * 0.9;
+        } else if (!currentlyInDanger && nextInDanger) {
+          score -= 280 + myVal;
+        } else {
+          score += 18;
+          if (difficulty === 'hard' && atk.type !== 'C') {
+            for (let r = 0; r < ROWS; r++) {
+              for (let c = 0; c < COLS; c++) {
+                const ep = board[r][c];
+                if (ep && ep.revealed && ep.side !== aiSide && canRegularCapture(atk.type, ep.type)) {
+                  const oldDist = Math.abs(act.fr - r) + Math.abs(act.fc - c);
+                  const newDist = Math.abs(act.tr - r) + Math.abs(act.tc - c);
+                  if (newDist < oldDist) score += 45 + (PIECE_VALUES[ep.type] || 100) * 0.08;
+                }
+              }
+            }
+          }
+        }
+
+      } else if (act.type === 'FLIP') {
+        score += 95;
+        if (difficulty === 'hard') {
+          const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+          for (const [dr, dc] of dirs) {
+            const nr = act.r + dr, nc = act.c + dc;
+            if (!inBounds(nr, nc)) continue;
+            const neighbor = board[nr][nc];
+            if (neighbor && neighbor.revealed) {
+              if (neighbor.side !== aiSide && DARK_RANKS[neighbor.type] >= 4) {
+                score -= 35;
+              } else if (neighbor.side === aiSide && DARK_RANKS[neighbor.type] >= 5) {
+                score += 22;
+              }
+            }
+          }
+        }
+      }
+
+      score += (Math.random() - 0.5) * (difficulty === 'hard' ? 18 : 65);
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestActions = [act];
+      } else if (Math.abs(score - bestScore) < 5) {
+        bestActions.push(act);
+      }
+    }
+
+    return bestActions[Math.floor(Math.random() * bestActions.length)];
+  }
+
+  // =========================================================================
+  // 4. 遊戲狀態與 iPhone 13 / iPhone 17 Pro Max 自適應排版
+  // =========================================================================
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  const LOGICAL_W = 540;
+  const LOGICAL_H = 960;
+  let dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const appEl = document.getElementById('app');
+
+  function drawFitText(text, x, y, maxW) {
+    if (maxW) {
+      ctx.fillText(text, x, y, maxW);
+    } else {
+      ctx.fillText(text, x, y);
+    }
+  }
+
+  function formatCapturedList(prefix, pieces, maxW) {
+    if (!pieces || pieces.length === 0) return `${prefix}尚無`;
+    const labels = pieces.map(p => PIECE_LABELS[p.side][p.type]);
+    let full = `${prefix}${labels.join(' ')} (${pieces.length})`;
+    if (ctx.measureText(full).width <= maxW) return full;
+    let compact = `${prefix}${labels.join('')} (${pieces.length})`;
+    if (ctx.measureText(compact).width <= maxW) return compact;
+    while (labels.length > 1 && ctx.measureText(`${prefix}${labels.join('')}…(${pieces.length})`).width > maxW) {
+      labels.pop();
+    }
+    return `${prefix}${labels.join('')}…(${pieces.length})`;
+  }
+
+  function resizeCanvas() {
+    const cs = window.getComputedStyle(appEl);
+    const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const availW = Math.max(240, appEl.clientWidth - padX);
+    const availH = Math.max(400, appEl.clientHeight - padY);
+
+    const targetRatio = LOGICAL_W / LOGICAL_H;
+    const availRatio = availW / availH;
+
+    let displayW, displayH;
+    if (availRatio < targetRatio) {
+      displayW = availW;
+      displayH = availW / targetRatio;
+    } else {
+      displayH = availH;
+      displayW = availH * targetRatio;
+    }
+
+    canvas.style.width = `${Math.floor(displayW)}px`;
+    canvas.style.height = `${Math.floor(displayH)}px`;
+    dpr = Math.min(window.devicePixelRatio || 1, 3);
+    canvas.width = Math.round(LOGICAL_W * dpr);
+    canvas.height = Math.round(LOGICAL_H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 120));
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', resizeCanvas);
+  }
+  resizeCanvas();
+
+  const BOARD_LEFT = 54;
+  const BOARD_TOP = 186;
+  const CELL_W = 108;
+  const CELL_H = 66;
+  const BOARD_W = CELL_W * COLS; // 432
+  const BOARD_H = CELL_H * ROWS; // 528
+
+  function gridToPixel(r, c) {
+    return {
+      x: BOARD_LEFT + (c + 0.5) * CELL_W,
+      y: BOARD_TOP + (r + 0.5) * CELL_H
+    };
+  }
+
+  function pixelToGrid(x, y) {
+    if (x < BOARD_LEFT - 12 || x > BOARD_LEFT + BOARD_W + 12 ||
+        y < BOARD_TOP - 12 || y > BOARD_TOP + BOARD_H + 12) {
+      return null;
+    }
+    const c = Math.floor((x - BOARD_LEFT) / CELL_W);
+    const r = Math.floor((y - BOARD_TOP) / CELL_H);
+    if (inBounds(r, c)) {
+      return { r, c };
+    }
+    return null;
+  }
+
+  const state = {
+    screen: 'MENU',
+    mode: 'AI',
+    difficulty: 'normal',
+    board: createInitialDarkBoard(),
+    turn: SIDE_RED,
+    firstMover: 'PLAYER',
+    playerSide: null,
+    aiSide: null,
+    idleMoves: 0,
+    chaseTracker: {
+      R: { chaserId: null, targetId: null, count: 0 },
+      B: { chaserId: null, targetId: null, count: 0 }
+    },
+    rps: {
+      phase: 'CHOOSE',
+      playerChoice: null,
+      aiChoice: null,
+      result: null,
+      timer: 0,
+      round: 1
+    },
+    selected: null,
+    legalMoves: [],
+    lastMove: null,
+    history: [],
+    score: 0,
+    bestScore: (() => {
+      try { return parseInt(localStorage.getItem('chuhan_dark_best_score') || '0', 10) || 0; }
+      catch (e) { return 0; }
+    })(),
+    turnCount: 1,
+    capturedByRed: [],
+    capturedByBlack: [],
+    aiThinking: false,
+    aiTimer: 0,
+    winner: null,
+    winReason: '',
+    flipAnim: null,
+    moveAnim: null,
+    battleAnim: null,
+    particles: [],
+    ashParticles: [],
+    floatingTexts: [],
+    screenShake: 0,
+    uiButtons: [],
+    animClock: 0
+  };
+
+  function resetGame(mode = state.mode, difficulty = state.difficulty) {
+    state.mode = mode;
+    state.difficulty = difficulty;
+    state.board = createInitialDarkBoard();
+    state.turn = SIDE_RED;
+    state.firstMover = 'PLAYER';
+    state.playerSide = null;
+    state.aiSide = null;
+    state.idleMoves = 0;
+    state.chaseTracker = {
+      R: { chaserId: null, targetId: null, count: 0 },
+      B: { chaserId: null, targetId: null, count: 0 }
+    };
+    state.selected = null;
+    state.legalMoves = [];
+    state.lastMove = null;
+    state.history = [];
+    state.score = 0;
+    state.turnCount = 1;
+    state.capturedByRed = [];
+    state.capturedByBlack = [];
+    state.aiThinking = false;
+    state.aiTimer = 0;
+    state.winner = null;
+    state.winReason = '';
+    state.flipAnim = null;
+    state.moveAnim = null;
+    state.battleAnim = null;
+    state.particles = [];
+    state.ashParticles = [];
+    state.floatingTexts = [];
+    state.screenShake = 0;
+
+    state.rps = {
+      phase: 'CHOOSE',
+      playerChoice: null,
+      aiChoice: null,
+      result: null,
+      timer: 0,
+      round: 1
+    };
+    state.screen = 'RPS';
+  }
+
+  function startRpsShowdown(playerChoice) {
+    if (state.rps.phase !== 'CHOOSE') return;
+    const keys = ['SCISSORS', 'ROCK', 'PAPER'];
+    const aiChoice = keys[Math.floor(Math.random() * keys.length)];
+
+    let result = 'DRAW';
+    if (playerChoice !== aiChoice) {
+      if (
+        (playerChoice === 'ROCK' && aiChoice === 'SCISSORS') ||
+        (playerChoice === 'SCISSORS' && aiChoice === 'PAPER') ||
+        (playerChoice === 'PAPER' && aiChoice === 'ROCK')
+      ) {
+        result = 'WIN';
+      } else {
+        result = 'LOSE';
+      }
+    }
+
+    state.rps.playerChoice = playerChoice;
+    state.rps.aiChoice = aiChoice;
+    state.rps.result = result;
+    state.rps.phase = 'ANIM';
+    state.rps.timer = 0.62;
+    sfx.playRpsSwing();
+  }
+
+  function enterBoardAfterRps() {
+    const playerWonRps = state.rps.result === 'WIN';
+    state.firstMover = playerWonRps ? 'PLAYER' : 'OPPONENT';
+    state.screen = 'PLAYING';
+
+    if (playerWonRps) {
+      const msg = state.mode === 'PVP' ? '🎉 1P 猜拳獲勝！由 1P 先手翻棋定色！' : '🎉 猜拳獲勝！由您奪得先手翻棋定色權！';
+      spawnFloatingText(LOGICAL_W / 2, 260, msg, '#ffe066', 21);
+    } else {
+      if (state.mode === 'AI') {
+        spawnFloatingText(LOGICAL_W / 2, 260, '🤖 電腦猜拳獲勝！由電腦先手翻開首棋定色...', '#80caff', 20);
+        state.aiThinking = true;
+        state.aiTimer = 0.65;
+      } else {
+        spawnFloatingText(LOGICAL_W / 2, 260, '🎉 2P 猜拳獲勝！由 2P 先手翻棋定色！', '#80caff', 21);
+      }
+    }
+  }
+
+  function saveHistorySnapshot() {
+    state.history.push({
+      board: cloneBoard(state.board),
+      turn: state.turn,
+      firstMover: state.firstMover,
+      playerSide: state.playerSide,
+      aiSide: state.aiSide,
+      idleMoves: state.idleMoves,
+      chaseTracker: {
+        R: { ...state.chaseTracker.R },
+        B: { ...state.chaseTracker.B }
+      },
+      lastMove: state.lastMove ? { ...state.lastMove } : null,
+      score: state.score,
+      turnCount: state.turnCount,
+      capturedByRed: [...state.capturedByRed],
+      capturedByBlack: [...state.capturedByBlack]
+    });
+  }
+
+  function spawnParticles(x, y, color, count = 22, speed = 5) {
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.5;
+      const spd = speed * (0.4 + Math.random() * 0.9);
+      state.particles.push({
+        x, y,
+        vx: Math.cos(angle) * spd,
+        vy: Math.sin(angle) * spd - 1.5,
+        size: 3 + Math.random() * 5,
+        color,
+        life: 1.0,
+        decay: 0.022 + Math.random() * 0.02
+      });
+    }
+  }
+
+  function spawnAshParticles(x, y, count = 55) {
+    for (let i = 0; i < count; i++) {
+      state.ashParticles.push({
+        x: x + (Math.random() - 0.5) * 34,
+        y: y + (Math.random() - 0.5) * 34,
+        vx: (Math.random() - 0.35) * 1.6,
+        vy: -0.9 - Math.random() * 2.2,
+        size: 2 + Math.random() * 3.8,
+        shade: Math.floor(25 + Math.random() * 65),
+        wobble: Math.random() * Math.PI * 2,
+        life: 1.0,
+        decay: 0.014 + Math.random() * 0.012
+      });
+    }
+  }
+
+  function spawnFloatingText(x, y, text, color = '#ffd86b', size = 22) {
+    state.floatingTexts.push({
+      x, y,
+      text,
+      color,
+      size,
+      vy: -1.3,
+      life: 1.0,
+      decay: 0.015
+    });
+  }
+
+  function executeFlip(r, c) {
+    const piece = state.board[r][c];
+    if (!piece || piece.revealed) return;
+
+    saveHistorySnapshot();
+    state.selected = null;
+    state.legalMoves = [];
+    sfx.playFlip();
+
+    const pos = gridToPixel(r, c);
+    state.flipAnim = {
+      r, c,
+      x: pos.x,
+      y: pos.y,
+      piece,
+      progress: 0,
+      duration: 0.28,
+      revealedTriggered: false
+    };
+  }
+
+  function finalizeFlip(r, c) {
+    const piece = state.board[r][c];
+    if (!piece) return;
+    piece.revealed = true;
+
+    state.idleMoves = 0;
+    state.chaseTracker.R = { chaserId: null, targetId: null, count: 0 };
+    state.chaseTracker.B = { chaserId: null, targetId: null, count: 0 };
+
+    const pos = gridToPixel(r, c);
+    const isRed = piece.side === SIDE_RED;
+    spawnParticles(pos.x, pos.y, isRed ? '#ff7b54' : '#58b4ff', 16, 3.8);
+
+    if (!state.playerSide) {
+      if (state.firstMover === 'PLAYER') {
+        state.playerSide = piece.side;
+        state.aiSide = piece.side === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+        state.turn = piece.side;
+        const armyName = isRed ? '赤虎紅貓軍' : '玄豹黑貓軍';
+        spawnFloatingText(LOGICAL_W / 2, pos.y - 28, `首翻定色：您執【${armyName}】！`, '#ffe066', 22);
+      } else {
+        state.aiSide = piece.side;
+        state.playerSide = piece.side === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+        state.turn = piece.side;
+        const myArmyName = state.playerSide === SIDE_RED ? '赤虎紅貓軍' : '玄豹黑貓軍';
+        const oppLabel = state.mode === 'AI' ? '電腦' : '2P';
+        const oppArmy = isRed ? '紅貓' : '黑貓';
+        spawnFloatingText(LOGICAL_W / 2, pos.y - 28, `${oppLabel}首翻得【${oppArmy}】，您執【${myArmyName}】！`, '#ffe066', 20);
+      }
+    } else {
+      const label = PIECE_LABELS[piece.side][piece.type];
+      spawnFloatingText(pos.x, pos.y - 26, `翻開【${label}】`, isRed ? '#ff9e80' : '#90d5ff', 20);
+    }
+
+    state.lastMove = { fr: r, fc: c, tr: r, tc: c };
+    advanceTurnAfterAction();
+  }
+
+  function executeMove(move) {
+    const movingPiece = state.board[move.fr][move.fc];
+    const targetPiece = state.board[move.tr][move.tc];
+    if (!movingPiece) return;
+
+    saveHistorySnapshot();
+
+    const startPos = gridToPixel(move.fr, move.fc);
+    const endPos = gridToPixel(move.tr, move.tc);
+
+    state.board[move.fr][move.fc] = null;
+    state.selected = null;
+    state.legalMoves = [];
+
+    if (targetPiece) {
+      state.board[move.tr][move.tc] = null;
+      sfx.playBattle(movingPiece.type);
+      const moveNames = BATTLE_MOVES[movingPiece.type] || ['霸氣喵擊！'];
+      const moveTitle = moveNames[Math.floor(Math.random() * moveNames.length)];
+
+      const styleMap = {
+        K: 'ROYAL_BLAST',
+        A: 'SLASH_SPLIT',
+        E: 'FLOOD_WASH',
+        H: 'KICK_FLY',
+        R: 'SCREEN_FLY',
+        C: 'ASH',
+        P: 'SKEWER_FLY'
+      };
+      const deathStyle = styleMap[movingPiece.type] || 'SKEWER_FLY';
+
+      state.battleAnim = {
+        move,
+        attacker: { ...movingPiece },
+        defender: { ...targetPiece },
+        startX: startPos.x,
+        startY: startPos.y,
+        targetX: endPos.x,
+        targetY: endPos.y,
+        progress: 0,
+        duration: 1.85,
+        hitTriggered: false,
+        deathStyle,
+        title: moveTitle,
+        defFlyX: 378,
+        defFlyY: 455,
+        defScale: 2.35,
+        defRot: 0
+      };
+    } else {
+      sfx.playMove();
+      state.moveAnim = {
+        move,
+        piece: { ...movingPiece },
+        startX: startPos.x,
+        startY: startPos.y,
+        targetX: endPos.x,
+        targetY: endPos.y,
+        progress: 0,
+        duration: 0.16
+      };
+    }
+  }
+
+  function finalizeMove(move, movingPiece, capturedPiece) {
+    state.board[move.tr][move.tc] = movingPiece;
+    state.lastMove = move;
+
+    if (capturedPiece) {
+      state.idleMoves = 0;
+      state.chaseTracker.R = { chaserId: null, targetId: null, count: 0 };
+      state.chaseTracker.B = { chaserId: null, targetId: null, count: 0 };
+
+      const pts = Math.round((PIECE_VALUES[capturedPiece.type] || 150) / 5);
+      if (movingPiece.side === SIDE_RED) {
+        state.capturedByRed.push(capturedPiece);
+      } else {
+        state.capturedByBlack.push(capturedPiece);
+      }
+
+      const isPlayerCapture = (state.mode === 'PVP') || (movingPiece.side === state.playerSide);
+      if (isPlayerCapture) {
+        state.score += pts;
+        if (state.score > state.bestScore) {
+          state.bestScore = state.score;
+          try { localStorage.setItem('chuhan_dark_best_score', String(state.bestScore)); } catch (e) {}
+        }
+        const pos = gridToPixel(move.tr, move.tc);
+        spawnFloatingText(pos.x, pos.y - 32, `+${pts} 戰功`, '#ffe066', 20);
+      }
+    } else {
+      state.idleMoves++;
+      const ct = state.chaseTracker[movingPiece.side];
+      const threatenedIds = move.threatenedIds || [];
+      if (threatenedIds.length > 0) {
+        const targetId = threatenedIds[0];
+        if (ct.chaserId === movingPiece.id && ct.targetId === targetId) {
+          ct.count++;
+          if (ct.count >= MAX_CHASE_COUNT) {
+            const pos = gridToPixel(move.tr, move.tc);
+            spawnFloatingText(LOGICAL_W / 2, pos.y - 26, '⚠️ 台灣競技規則：已達連續追捉上限，下步禁捉同子！', '#ffb86c', 16);
+          }
+        } else {
+          ct.chaserId = movingPiece.id;
+          ct.targetId = targetId;
+          ct.count = 1;
+        }
+      } else {
+        ct.chaserId = null;
+        ct.targetId = null;
+        ct.count = 0;
+      }
+    }
+
+    advanceTurnAfterAction();
+  }
+
+  function advanceTurnAfterAction() {
+    state.turn = state.turn === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+    if (state.turn === (state.playerSide || SIDE_RED)) {
+      state.turnCount++;
+    }
+
+    if (state.idleMoves >= MAX_IDLE_MOVES) {
+      state.winner = 'DRAW';
+      state.winReason = `連續 ${MAX_IDLE_MOVES} 步無翻棋且無吃子，依台灣標準競技規則判為【和局】！`;
+      sfx.playDraw();
+      state.screen = 'GAMEOVER';
+      return;
+    }
+
+    const redRemain = countRemainingPieces(state.board, SIDE_RED);
+    const blkRemain = countRemainingPieces(state.board, SIDE_BLACK);
+    const nextActions = getAllLegalActions(state.board, state.turn);
+
+    if (redRemain === 0 || blkRemain === 0 || nextActions.length === 0) {
+      if (redRemain === 0) {
+        state.winner = SIDE_BLACK;
+      } else if (blkRemain === 0) {
+        state.winner = SIDE_RED;
+      } else {
+        state.winner = state.turn === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+      }
+
+      const isPlayerWin = state.mode === 'PVP'
+        ? (state.winner === SIDE_RED)
+        : (state.winner === (state.playerSide || SIDE_RED));
+
+      if (isPlayerWin) {
+        state.score += 500;
+        if (state.score > state.bestScore) {
+          state.bestScore = state.score;
+          try { localStorage.setItem('chuhan_dark_best_score', String(state.bestScore)); } catch (e) {}
+        }
+        state.winReason = (redRemain === 0 || blkRemain === 0)
+          ? '敵方 16 子全數陣亡！恭喜獲得【殲滅勝】！'
+          : '敵方無暗棋可翻且無子可動，獲得【困斃勝】！';
+        sfx.playWin();
+      } else {
+        state.winReason = (redRemain === 0 || blkRemain === 0)
+          ? '我方 16 子全數陣亡，敵軍獲得【殲滅勝】！'
+          : '我方無暗棋可翻且無子可動（欠行困斃）！';
+        sfx.playLose();
+      }
+      state.screen = 'GAMEOVER';
+      return;
+    }
+
+    if (state.mode === 'AI' && state.turn === state.aiSide && state.screen === 'PLAYING') {
+      state.aiThinking = true;
+      state.aiTimer = 0.42;
+    }
+  }
+
+  function handleUndo() {
+    if (state.flipAnim || state.moveAnim || state.battleAnim || state.aiThinking) return;
+    if (state.history.length === 0) return;
+
+    const steps = (state.mode === 'AI' && state.history.length >= 2) ? 2 : 1;
+    let snap = null;
+    for (let i = 0; i < steps; i++) {
+      if (state.history.length > 0) snap = state.history.pop();
+    }
+    if (snap) {
+      state.board = snap.board;
+      state.turn = snap.turn;
+      state.firstMover = snap.firstMover;
+      state.playerSide = snap.playerSide;
+      state.aiSide = snap.aiSide;
+      state.idleMoves = snap.idleMoves || 0;
+      state.chaseTracker = snap.chaseTracker || {
+        R: { chaserId: null, targetId: null, count: 0 },
+        B: { chaserId: null, targetId: null, count: 0 }
+      };
+      state.lastMove = snap.lastMove;
+      state.score = snap.score;
+      state.turnCount = snap.turnCount;
+      state.capturedByRed = snap.capturedByRed;
+      state.capturedByBlack = snap.capturedByBlack;
+      state.selected = null;
+      state.legalMoves = [];
+      sfx.playSelect();
+
+      if (state.mode === 'AI' && !state.playerSide && state.firstMover === 'OPPONENT') {
+        state.aiThinking = true;
+        state.aiTimer = 0.45;
+      }
+    }
+  }
+
+  // =========================================================================
+  // 5. 3D 軟萌貓咪武將與暗棋盲盒木蓋繪製引擎
+  // =========================================================================
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawButton(btn) {
+    state.uiButtons.push(btn);
+    ctx.save();
+    roundRect(ctx, btn.x, btn.y, btn.w, btn.h, btn.r || 12);
+    const grad = ctx.createLinearGradient(btn.x, btn.y, btn.x, btn.y + btn.h);
+    grad.addColorStop(0, btn.bg1 || '#8b261d');
+    grad.addColorStop(1, btn.bg2 || '#59130d');
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = btn.border || '#e8b960';
+    ctx.stroke();
+
+    ctx.fillStyle = btn.color || '#fff3d6';
+    ctx.font = `bold ${btn.fontSize || 20}px "PingFang TC", "Microsoft JhengHei", sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
+    ctx.restore();
+  }
+
+  function drawUnrevealedPiece(x, y, scaleX = 1, scaleY = 1) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(scaleX, scaleY);
+
+    ctx.beginPath();
+    ctx.ellipse(0, 7, 29, 22, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(45, 22, 8, 0.42)';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.ellipse(0, 4, 27, 20.5, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#3b2010';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#8c5328';
+    ctx.stroke();
+
+    const topGrad = ctx.createRadialGradient(-6, -6, 3, 0, -2, 27);
+    topGrad.addColorStop(0, '#8c4f27');
+    topGrad.addColorStop(0.65, '#593015');
+    topGrad.addColorStop(1, '#381d0b');
+    ctx.beginPath();
+    ctx.ellipse(0, -2, 26, 19.5, 0, 0, Math.PI * 2);
+    ctx.fillStyle = topGrad;
+    ctx.fill();
+
+    ctx.lineWidth = 2.2;
+    ctx.strokeStyle = '#eab657';
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.ellipse(0, -2, 21, 15.2, 0, 0, Math.PI * 2);
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1.3;
+    ctx.strokeStyle = 'rgba(255, 216, 102, 0.72)';
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#ffd56b';
+    ctx.beginPath();
+    ctx.ellipse(0, 2, 7.2, 5.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    const toes = [
+      { tx: -8.2, ty: -4.2, rot: -0.35 },
+      { tx: -3.0, ty: -7.5, rot: -0.12 },
+      { tx:  3.0, ty: -7.5, rot:  0.12 },
+      { tx:  8.2, ty: -4.2, rot:  0.35 }
+    ];
+    for (const t of toes) {
+      ctx.beginPath();
+      ctx.ellipse(t.tx, t.ty, 2.7, 3.6, t.rot, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  function drawRealisticCatHead(ctx, cx, cy, r, isRed, angry = false, charred = 0) {
+    ctx.save();
+
+    const furTopColor  = charred > 0.5 ? '#363432' : (isRed ? '#de8747' : '#525b66');
+    const furDarkStripe = charred > 0.5 ? '#1c1b1a' : (isRed ? '#b35c20' : '#2a3038');
+    const earInnerPink = charred > 0.5 ? '#474240' : (isRed ? '#eb9b8f' : '#9c848a');
+    const earFluffWhite = charred > 0.5 ? '#555250' : '#fffcf7';
+
+    [-1, 1].forEach(dir => {
+      ctx.save();
+      ctx.fillStyle = furTopColor;
+      ctx.beginPath();
+      ctx.moveTo(cx + dir * r * 0.42, cy - r * 0.62);
+      ctx.quadraticCurveTo(cx + dir * r * 0.98, cy - r * 1.15, cx + dir * r * 1.12, cy - r * 0.92);
+      ctx.quadraticCurveTo(cx + dir * r * 1.16, cy - r * 0.35, cx + dir * r * 0.88, cy - r * 0.08);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = furDarkStripe;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+      ctx.fillStyle = earInnerPink;
+      ctx.beginPath();
+      ctx.moveTo(cx + dir * r * 0.55, cy - r * 0.54);
+      ctx.quadraticCurveTo(cx + dir * r * 0.92, cy - r * 0.94, cx + dir * r * 1.00, cy - r * 0.78);
+      ctx.quadraticCurveTo(cx + dir * r * 0.98, cy - r * 0.36, cx + dir * r * 0.78, cy - r * 0.18);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = earFluffWhite;
+      ctx.beginPath();
+      ctx.moveTo(cx + dir * r * 0.52, cy - r * 0.32);
+      ctx.lineTo(cx + dir * r * 0.82, cy - r * 0.52);
+      ctx.lineTo(cx + dir * r * 0.74, cy - r * 0.34);
+      ctx.lineTo(cx + dir * r * 0.88, cy - r * 0.36);
+      ctx.lineTo(cx + dir * r * 0.68, cy - r * 0.18);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    });
+
+    const rx = r * 1.22;
+    const ry = r * 0.92;
+
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + 1.8, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = charred > 0.5 ? '#121110' : 'rgba(95, 52, 24, 0.32)';
+    ctx.fill();
+
+    const faceGrad = ctx.createRadialGradient(
+      cx, cy - ry * 0.15, r * 0.15,
+      cx, cy + ry * 0.1, rx * 1.08
+    );
+    if (charred > 0.5) {
+      faceGrad.addColorStop(0, '#524f4d');
+      faceGrad.addColorStop(0.7, '#2b2927');
+      faceGrad.addColorStop(1, '#171615');
+    } else if (isRed) {
+      faceGrad.addColorStop(0, '#ffffff');
+      faceGrad.addColorStop(0.68, '#fff7eb');
+      faceGrad.addColorStop(1, '#edd5bc');
+    } else {
+      faceGrad.addColorStop(0, '#f5f7fa');
+      faceGrad.addColorStop(0.68, '#dce2e8');
+      faceGrad.addColorStop(1, '#b0bac4');
+    }
+
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = faceGrad;
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.fillStyle = furTopColor;
+    [-1, 1].forEach(dir => {
+      ctx.beginPath();
+      ctx.moveTo(cx + dir * r * 0.08, cy - ry * 1.05);
+      ctx.quadraticCurveTo(cx + dir * rx * 0.85, cy - ry * 0.95, cx + dir * rx * 1.05, cy - ry * 0.12);
+      ctx.quadraticCurveTo(cx + dir * rx * 0.55, cy - ry * 0.25, cx + dir * r * 0.14, cy - ry * 0.42);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = furDarkStripe;
+      ctx.beginPath();
+      ctx.ellipse(cx + dir * r * 0.42, cy - ry * 0.65, r * 0.11, r * 0.32, dir * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(cx + dir * r * 0.72, cy - ry * 0.48, r * 0.09, r * 0.26, dir * 0.55, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = furTopColor;
+      ctx.beginPath();
+      ctx.ellipse(cx + dir * rx * 0.76, cy + ry * 0.14, r * 0.22, r * 0.075, dir * -0.18, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(cx + dir * rx * 0.68, cy + ry * 0.34, r * 0.17, r * 0.068, dir * -0.12, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    if (charred <= 0.5) {
+      ctx.fillStyle = isRed ? 'rgba(255, 138, 115, 0.36)' : 'rgba(235, 145, 165, 0.28)';
+      ctx.beginPath();
+      ctx.ellipse(cx - rx * 0.52, cy + ry * 0.12, r * 0.24, r * 0.14, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx + rx * 0.52, cy + ry * 0.12, r * 0.24, r * 0.14, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    const eyeY = cy - ry * 0.06;
+    const eyeX = rx * 0.40;
+    ctx.strokeStyle = charred > 0.5 ? '#111111' : '#2b1911';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+
+    [-1, 1].forEach(dir => {
+      const ex = cx + dir * eyeX;
+      ctx.beginPath();
+      ctx.moveTo(ex - r * 0.24, eyeY + dir * r * 0.03);
+      ctx.quadraticCurveTo(ex, eyeY - r * 0.22, ex + r * 0.24, eyeY - dir * r * 0.01);
+      ctx.stroke();
+
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(ex + dir * r * 0.18, eyeY - r * 0.04);
+      ctx.lineTo(ex + dir * r * 0.29, eyeY - r * 0.10);
+      ctx.stroke();
+      ctx.lineWidth = 2.5;
+    });
+
+    const noseY = cy + ry * 0.02;
+    ctx.fillStyle = charred > 0.5 ? '#262626' : '#f28b82';
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.11, noseY - r * 0.04);
+    ctx.lineTo(cx + r * 0.11, noseY - r * 0.04);
+    ctx.lineTo(cx, noseY + r * 0.06);
+    ctx.closePath();
+    ctx.fill();
+
+    const mouthTopY = noseY + r * 0.07;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.30, mouthTopY + r * 0.04);
+    ctx.quadraticCurveTo(cx - r * 0.12, mouthTopY - r * 0.03, cx, mouthTopY + r * 0.02);
+    ctx.quadraticCurveTo(cx + r * 0.12, mouthTopY - r * 0.03, cx + r * 0.30, mouthTopY + r * 0.04);
+    ctx.quadraticCurveTo(cx + r * 0.28, mouthTopY + r * 0.54, cx, mouthTopY + r * 0.56);
+    ctx.quadraticCurveTo(cx - r * 0.28, mouthTopY + r * 0.54, cx - r * 0.30, mouthTopY + r * 0.04);
+    ctx.closePath();
+
+    ctx.fillStyle = charred > 0.5 ? '#1a1a1a' : '#7a2e28';
+    ctx.fill();
+
+    ctx.clip();
+    ctx.fillStyle = charred > 0.5 ? '#404040' : '#f28b82';
+    ctx.beginPath();
+    ctx.ellipse(cx, mouthTopY + r * 0.42, r * 0.26, r * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = charred > 0.5 ? '#555' : '#ffb8b0';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.strokeStyle = charred > 0.5 ? '#1a1a1a' : '#59221c';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.32, mouthTopY + r * 0.05);
+    ctx.quadraticCurveTo(cx - r * 0.12, mouthTopY - r * 0.03, cx, mouthTopY + r * 0.02);
+    ctx.quadraticCurveTo(cx + r * 0.12, mouthTopY - r * 0.03, cx + r * 0.32, mouthTopY + r * 0.05);
+    ctx.stroke();
+
+    ctx.strokeStyle = charred > 0.5 ? '#444' : (isRed ? '#b87648' : '#7c8794');
+    ctx.lineWidth = 1.0;
+    [-1, 1].forEach(dir => {
+      ctx.beginPath();
+      ctx.moveTo(cx + dir * rx * 0.48, cy + ry * 0.08);
+      ctx.quadraticCurveTo(cx + dir * rx * 0.88, cy + ry * 0.02, cx + dir * rx * 1.18, cy + ry * 0.12);
+      ctx.moveTo(cx + dir * rx * 0.50, cy + ry * 0.20);
+      ctx.quadraticCurveTo(cx + dir * rx * 0.88, cy + ry * 0.20, cx + dir * rx * 1.15, cy + ry * 0.30);
+      ctx.stroke();
+    });
+
+    ctx.restore();
+  }
+
+  function drawChibiCatBody(ctx, cx, cy, isRed, charred = 0, raiseArms = true) {
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    const scarfMain = charred > 0.5 ? '#33302e' : (isRed ? '#d9623b' : '#3b6e8c');
+    const scarfDark = charred > 0.5 ? '#1c1a19' : (isRed ? '#a63f1e' : '#23465c');
+    const coatCream = charred > 0.5 ? '#454240' : (isRed ? '#f7ead9' : '#d8e0e8');
+    const coatBrok  = charred > 0.5 ? '#262423' : (isRed ? '#593e31' : '#2b333d');
+    const pantsNavy = charred > 0.5 ? '#171615' : (isRed ? '#282c37' : '#181c24');
+    const pawWhite  = charred > 0.5 ? '#4a4745' : '#fffbf5';
+    const tailBase  = charred > 0.5 ? '#2e2b29' : (isRed ? '#c97236' : '#4a525d');
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = tailBase;
+    ctx.lineWidth = 6.8;
+    ctx.beginPath();
+    ctx.moveTo(-9, 13);
+    ctx.quadraticCurveTo(-22, 12, -20, -2);
+    ctx.stroke();
+
+    ctx.strokeStyle = pawWhite;
+    ctx.lineWidth = 6.8;
+    ctx.beginPath();
+    ctx.moveTo(-20.2, 5);
+    ctx.lineTo(-20.5, 2);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(-20, -3, 3.4, 0, Math.PI * 2);
+    ctx.fillStyle = pawWhite;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = pawWhite;
+    ctx.beginPath();
+    ctx.ellipse(-7.5, 19, 5.2, 3.4, 0, 0, Math.PI * 2);
+    ctx.ellipse(7.5, 19, 5.2, 3.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = pantsNavy;
+    roundRect(ctx, -12.5, 11, 12, 7.5, 3);
+    ctx.fill();
+    roundRect(ctx, 0.5, 11, 12, 7.5, 3);
+    ctx.fill();
+    ctx.fillStyle = '#7a6248';
+    ctx.fillRect(-12, 16, 11, 2);
+    ctx.fillRect(1, 16, 11, 2);
+
+    ctx.fillStyle = pawWhite;
+    roundRect(ctx, -8, 4, 16, 9, 4);
+    ctx.fill();
+
+    ctx.fillStyle = scarfMain;
+    roundRect(ctx, -9, 9.5, 18, 3.2, 1.5);
+    ctx.fill();
+    ctx.fillRect(-1.2, 10, 2.4, 6.5);
+
+    ctx.fillStyle = '#fffdf9';
+    [-4, -2, 0, 2, 4].forEach((bx, idx) => {
+      ctx.beginPath();
+      ctx.arc(bx, 6.5 + (idx % 2 === 1 ? 1.2 : 0), 1.1, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    ctx.fillStyle = coatBrok;
+    roundRect(ctx, -14, 2, 7, 12, 2.5);
+    ctx.fill();
+    roundRect(ctx, 7, 2, 7, 12, 2.5);
+    ctx.fill();
+
+    ctx.fillStyle = coatCream;
+    ctx.beginPath();
+    ctx.moveTo(-13.5, 3);
+    ctx.lineTo(-5.5, 3);
+    ctx.lineTo(-7.5, 13.5);
+    ctx.lineTo(-14, 13.5);
+    ctx.closePath();
+    ctx.fill();
+
+    if (raiseArms) {
+      [-1, 1].forEach(dir => {
+        ctx.save();
+        ctx.translate(dir * 13.5, 4);
+        ctx.rotate(dir * -0.45);
+        ctx.fillStyle = coatBrok;
+        roundRect(ctx, -4, -6, 8, 7, 2.5);
+        ctx.fill();
+        ctx.fillStyle = pawWhite;
+        ctx.beginPath();
+        ctx.arc(0, -7.5, 4.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
+    }
+
+    const scarfGrad = ctx.createLinearGradient(-12, 0, 12, 6);
+    scarfGrad.addColorStop(0, scarfMain);
+    scarfGrad.addColorStop(1, scarfDark);
+    ctx.fillStyle = scarfGrad;
+    roundRect(ctx, -12.5, 0, 25, 6.5, 3.2);
+    ctx.fill();
+
+    ctx.fillStyle = scarfMain;
+    ctx.beginPath();
+    ctx.moveTo(5, 3);
+    ctx.lineTo(11.5, 3);
+    ctx.lineTo(13, 14.5);
+    ctx.lineTo(6.5, 14.5);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = '#f7d6c4';
+    ctx.beginPath();
+    ctx.arc(9.5, 10, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(6.8, 13.5, 6, 2);
+
+    ctx.restore();
+  }
+
+  function draw3DCatModel(ctx, type, isRed, charred = 0) {
+    const accentGold = charred > 0.5 ? '#55524f' : '#f5be4f';
+    const woodDark   = charred > 0.5 ? '#262422' : '#78492a';
+    const woodLight  = charred > 0.5 ? '#403d3a' : '#d49b6a';
+
+    if (type === 'R') {
+      drawChibiCatBody(ctx, 0, -2, isRed, charred, true);
+      drawRealisticCatHead(ctx, 0, -9, 12.2, isRed, false, charred);
+
+      const carGrad = ctx.createLinearGradient(0, 8, 0, 19);
+      carGrad.addColorStop(0, isRed ? '#d9623b' : '#3b6e8c');
+      carGrad.addColorStop(1, isRed ? '#8f3415' : '#1f3f54');
+      roundRect(ctx, -20, 8, 40, 10, 5);
+      ctx.fillStyle = carGrad;
+      ctx.fill();
+
+      roundRect(ctx, -16, 10, 32, 3, 1.5);
+      ctx.fillStyle = woodLight;
+      ctx.fill();
+
+      [-11, 11].forEach(wx => {
+        ctx.beginPath();
+        ctx.arc(wx, 18, 5.2, 0, Math.PI * 2);
+        ctx.fillStyle = '#2b2623';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(wx, 18, 2.4, 0, Math.PI * 2);
+        ctx.fillStyle = accentGold;
+        ctx.fill();
+      });
+
+    } else if (type === 'C') {
+      ctx.save();
+      ctx.translate(-14, 9);
+      ctx.rotate(-0.55);
+      roundRect(ctx, -4.5, -19, 9, 20, 3.5);
+      ctx.fillStyle = charred > 0.5 ? '#2b2b2b' : '#4a5561';
+      ctx.fill();
+      roundRect(ctx, -5.5, -21, 11, 4, 2);
+      ctx.fillStyle = accentGold;
+      ctx.fill();
+      ctx.restore();
+
+      ctx.beginPath();
+      ctx.arc(-14, 16.5, 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = woodDark;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(-14, 16.5, 2.3, 0, Math.PI * 2);
+      ctx.fillStyle = accentGold;
+      ctx.fill();
+
+      drawChibiCatBody(ctx, 5, 0, isRed, charred, true);
+      drawRealisticCatHead(ctx, 5, -7, 11.8, isRed, false, charred);
+
+    } else if (type === 'H') {
+      ctx.fillStyle = woodDark;
+      roundRect(ctx, -13, 12, 4, 7.5, 2);
+      ctx.fill();
+      roundRect(ctx, 9, 12, 4, 7.5, 2);
+      ctx.fill();
+
+      roundRect(ctx, -15, 5, 29, 9.5, 4.8);
+      ctx.fillStyle = woodLight;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.ellipse(14, 2, 5, 7.5, 0.3, 0, Math.PI * 2);
+      ctx.fillStyle = woodLight;
+      ctx.fill();
+
+      drawChibiCatBody(ctx, -1, -3, isRed, charred, true);
+      drawRealisticCatHead(ctx, -1, -10, 11.8, isRed, false, charred);
+
+    } else if (type === 'E') {
+      const eleColor = charred > 0.5 ? '#363636' : '#96a6b0';
+      roundRect(ctx, -15, 5, 30, 12, 6);
+      ctx.fillStyle = eleColor;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(13, 7, 6.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = eleColor;
+      ctx.lineWidth = 3.8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(17, 8);
+      ctx.quadraticCurveTo(22, 12, 18, 16);
+      ctx.stroke();
+
+      drawChibiCatBody(ctx, -1, -3, isRed, charred, true);
+      drawRealisticCatHead(ctx, -1, -10, 11.8, isRed, false, charred);
+
+    } else if (type === 'A') {
+      ctx.strokeStyle = woodLight;
+      ctx.lineWidth = 3.5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-17, -15); ctx.lineTo(17, 15);
+      ctx.moveTo(17, -15); ctx.lineTo(-17, 15);
+      ctx.stroke();
+
+      drawChibiCatBody(ctx, 0, 0, isRed, charred, true);
+      drawRealisticCatHead(ctx, 0, -7, 12.4, isRed, false, charred);
+
+    } else if (type === 'K') {
+      drawChibiCatBody(ctx, 0, 0, isRed, charred, true);
+      drawRealisticCatHead(ctx, 0, -7, 12.8, isRed, false, charred);
+
+      ctx.fillStyle = accentGold;
+      ctx.beginPath();
+      ctx.moveTo(-7, -18);
+      ctx.lineTo(-8, -25);
+      ctx.lineTo(-3, -21);
+      ctx.lineTo(0, -27);
+      ctx.lineTo(3, -21);
+      ctx.lineTo(8, -25);
+      ctx.lineTo(7, -18);
+      ctx.closePath();
+      ctx.fill();
+
+    } else {
+      drawChibiCatBody(ctx, 0, 0, isRed, charred, true);
+      drawRealisticCatHead(ctx, 0, -7, 12.4, isRed, false, charred);
+
+      if (charred <= 0.5) {
+        ctx.fillStyle = isRed ? '#e07a3c' : '#5c92b8';
+        ctx.beginPath();
+        ctx.arc(-18, -3, 2.2, 0, Math.PI * 2);
+        ctx.arc(-15.5, -4.2, 2.2, 0, Math.PI * 2);
+        ctx.lineTo(-17.8, 0.5);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.font = 'bold 11px sans-serif';
+        ctx.fillText('♪', 16, -2);
+      }
+
+      ctx.strokeStyle = woodDark;
+      ctx.lineWidth = 2.6;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(14, 17);
+      ctx.lineTo(14, -14);
+      ctx.stroke();
+      if (charred <= 0.5) {
+        ctx.fillStyle = '#d94832';
+        ctx.beginPath();
+        ctx.arc(14, -13, 2.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function drawPiece(x, y, piece, scale = 1, alpha = 1, rotation = 0, isSelected = false, charred = 0) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.rotate(rotation);
+    ctx.scale(scale, scale);
+
+    const isRed = piece.side === SIDE_RED;
+
+    if (isSelected) {
+      const pulse = 1 + Math.sin(state.animClock * 7) * 0.06;
+      ctx.save();
+      ctx.scale(pulse, pulse);
+      ctx.beginPath();
+      ctx.ellipse(0, 18, 25, 11, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255, 245, 215, 0.78)';
+      ctx.fill();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = isRed ? '#e06b3c' : '#3b7ea1';
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (charred < 0.7) {
+      ctx.beginPath();
+      ctx.ellipse(0, 19.5, 17, 6.2, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(80, 50, 25, 0.30)';
+      ctx.fill();
+    }
+
+    const bounceY = isSelected ? (-4.5 + Math.sin(state.animClock * 8) * 2.2) : 0;
+    ctx.translate(0, bounceY);
+
+    draw3DCatModel(ctx, piece.type, isRed, charred);
+
+    if (charred < 0.6) {
+      const tagX = 17.5;
+      const tagY = 14.5;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(tagX, tagY + 1.2, 9.5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(50, 30, 15, 0.28)';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(tagX, tagY, 9.5, 0, Math.PI * 2);
+      ctx.fillStyle = isRed ? '#c94a29' : '#283c4f';
+      ctx.fill();
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = '#fff8eb';
+      ctx.stroke();
+
+      const label = PIECE_LABELS[piece.side][piece.type];
+      ctx.fillStyle = '#fff8eb';
+      ctx.font = 'bold 12px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, tagX, tagY + 0.5);
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  function renderRpsScreen() {
+    roundRect(ctx, 26, 42, LOGICAL_W - 52, LOGICAL_H - 84, 22);
+    const grad = ctx.createLinearGradient(0, 42, 0, LOGICAL_H - 42);
+    grad.addColorStop(0, '#361f12');
+    grad.addColorStop(0.5, '#26140b');
+    grad.addColorStop(1, '#1a0d06');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#d4a253';
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 36px "KaiTi", "DFKai-SB", "Microsoft JhengHei", serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🐾 喵拳爭先 · 決定先後手', LOGICAL_W / 2, 96);
+
+    ctx.fillStyle = '#e8c996';
+    ctx.font = 'bold 16.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    const subText = state.rps.round > 1
+      ? `第 ${state.rps.round} 回合加賽！贏家奪得暗棋「先手首翻定色權」！`
+      : '依台灣標準暗棋規則：猜拳勝者先翻棋，首翻花色即為勝者陣營！';
+    drawFitText(subText, LOGICAL_W / 2, 138, LOGICAL_W - 80);
+
+    const stageX = 48, stageY = 172, stageW = LOGICAL_W - 96, stageH = 340;
+    roundRect(ctx, stageX, stageY, stageW, stageH, 18);
+    const stGrad = ctx.createLinearGradient(0, stageY, 0, stageY + stageH);
+    stGrad.addColorStop(0, '#233d3b');
+    stGrad.addColorStop(1, '#152625');
+    ctx.fillStyle = stGrad;
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#82a39e';
+    ctx.stroke();
+
+    const isAnim = state.rps.phase === 'ANIM';
+    const swingY = isAnim ? Math.sin(state.animClock * 28) * 16 : Math.sin(state.animClock * 4) * 3;
+
+    ctx.fillStyle = '#ff9e80';
+    ctx.font = 'bold 18px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(state.mode === 'PVP' ? '【1P 玩家】' : '【您（玩家）】', 150, stageY + 36);
+    drawPiece(150, stageY + 135 + swingY, { side: SIDE_RED, type: 'K', revealed: true }, 1.85);
+
+    ctx.fillStyle = '#90d5ff';
+    ctx.font = 'bold 18px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(state.mode === 'PVP' ? '【2P 對手】' : '【電腦貓宗師】', LOGICAL_W - 150, stageY + 36);
+    drawPiece(LOGICAL_W - 150, stageY + 135 + swingY, { side: SIDE_BLACK, type: 'K', revealed: true }, 1.85);
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'italic bold 28px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText('VS', LOGICAL_W / 2, stageY + 130);
+
+    const drawHandBubble = (bx, by, choiceKey, isPending, borderColor) => {
+      ctx.save();
+      ctx.translate(bx, by + (isAnim ? Math.sin(state.animClock * 28) * 14 : 0));
+      ctx.beginPath();
+      ctx.arc(0, 0, 44, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff8eb';
+      ctx.fill();
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = borderColor;
+      ctx.stroke();
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      if (isPending) {
+        ctx.font = 'bold 34px "PingFang TC", sans-serif';
+        ctx.fillStyle = '#78492a';
+        ctx.fillText(isAnim ? '✊' : '❔', 0, -4);
+        ctx.font = 'bold 13px "PingFang TC", sans-serif';
+        ctx.fillText(isAnim ? '出拳中' : '請選擇', 0, 26);
+      } else {
+        const info = RPS_INFO[choiceKey];
+        ctx.font = '36px sans-serif';
+        ctx.fillText(info.icon, 0, -6);
+        ctx.fillStyle = '#3b2010';
+        ctx.font = 'bold 14px "PingFang TC", sans-serif';
+        ctx.fillText(info.name, 0, 25);
+      }
+      ctx.restore();
+    };
+
+    const showResult = state.rps.phase === 'RESULT';
+    drawHandBubble(150, stageY + 258, state.rps.playerChoice, !showResult, '#e06b3c');
+    drawHandBubble(LOGICAL_W - 150, stageY + 258, state.rps.aiChoice, !showResult, '#3b7ea1');
+
+    if (state.rps.phase === 'CHOOSE') {
+      ctx.fillStyle = '#ffe066';
+      ctx.font = 'bold 22px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      ctx.fillText('👇 請選擇您的出拳：', LOGICAL_W / 2, 558);
+
+      const btnW = 132, btnH = 115, gap = 20;
+      const startX = (LOGICAL_W - (btnW * 3 + gap * 2)) / 2;
+      const btnY = 592;
+
+      const choices = [
+        { key: 'SCISSORS', label: '✌️ 剪刀', bg1: '#a33a1d', bg2: '#63200d' },
+        { key: 'ROCK',     label: '✊ 石頭', bg1: '#8f5b19', bg2: '#54330a' },
+        { key: 'PAPER',    label: '🖐️ 布',   bg1: '#2b664c', bg2: '#173b2b' }
+      ];
+
+      choices.forEach((ch, idx) => {
+        drawButton({
+          x: startX + idx * (btnW + gap),
+          y: btnY,
+          w: btnW,
+          h: btnH,
+          r: 18,
+          label: ch.label,
+          fontSize: 23,
+          bg1: ch.bg1,
+          bg2: ch.bg2,
+          action: `RPS_${ch.key}`
+        });
+      });
+
+    } else if (state.rps.phase === 'ANIM') {
+      ctx.fillStyle = '#ffd866';
+      ctx.font = 'bold 28px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      ctx.fillText('剪刀、石頭、布 🐾！', LOGICAL_W / 2, 625);
+
+    } else if (state.rps.phase === 'RESULT') {
+      let resTitle = '';
+      let resSub = '';
+      let resColor = '#ffd866';
+
+      if (state.rps.result === 'WIN') {
+        resTitle = state.mode === 'PVP' ? '🎉 1P 猜拳獲勝！奪得先手！' : '🎉 恭喜猜拳獲勝！您獲得先手！';
+        resSub = '即將進入棋盤，由您率先翻開第一顆暗棋決定花色...';
+        resColor = '#ffe066';
+      } else if (state.rps.result === 'LOSE') {
+        resTitle = state.mode === 'PVP' ? '⚡ 2P 猜拳獲勝！由 2P 先手！' : '🤖 電腦猜拳獲勝！由電腦先手！';
+        resSub = state.mode === 'PVP'
+          ? '即將進入棋盤，由 2P 率先翻開第一顆暗棋...'
+          : '即將進入棋盤，由電腦先翻開第一顆暗棋決定花色...';
+        resColor = '#80caff';
+      } else {
+        resTitle = '🤝 雙方平手！不分高下！';
+        resSub = '準備再次出拳一決勝負...';
+        resColor = '#ffb870';
+      }
+
+      roundRect(ctx, 52, 555, LOGICAL_W - 104, 125, 16);
+      ctx.fillStyle = 'rgba(20, 10, 5, 0.75)';
+      ctx.fill();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = resColor;
+      ctx.stroke();
+
+      ctx.fillStyle = resColor;
+      ctx.font = 'bold 24px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      drawFitText(resTitle, LOGICAL_W / 2, 598, LOGICAL_W - 128);
+
+      ctx.fillStyle = '#f5e6c8';
+      ctx.font = '16.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      drawFitText(resSub, LOGICAL_W / 2, 642, LOGICAL_W - 128);
+    }
+
+    drawButton({
+      x: 155, y: 818, w: LOGICAL_W - 310, h: 50, r: 14,
+      label: '🏠 返回主選單',
+      fontSize: 18,
+      bg1: '#4d3624',
+      bg2: '#302014',
+      action: 'MENU'
+    });
+  }
+
+  function renderBattleCutscene(b) {
+    const t = b.progress;
+    const isRedAtk = b.attacker.side === SIDE_RED;
+
+    let openAlpha = 1.0;
+    if (t < 0.12) openAlpha = t / 0.12;
+    else if (t > 0.88) openAlpha = Math.max(0, (1 - t) / 0.12);
+
+    ctx.save();
+
+    ctx.fillStyle = `rgba(10, 5, 2, ${0.78 * openAlpha})`;
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    const stageX = 24, stageY = 230, stageW = LOGICAL_W - 48, stageH = 430;
+    ctx.save();
+    ctx.globalAlpha = openAlpha;
+
+    roundRect(ctx, stageX, stageY, stageW, stageH, 20);
+    const stageGrad = ctx.createLinearGradient(0, stageY, 0, stageY + stageH);
+    stageGrad.addColorStop(0, '#2c1910');
+    stageGrad.addColorStop(0.58, '#4a2b18');
+    stageGrad.addColorStop(0.60, '#8c5830');
+    stageGrad.addColorStop(1, '#523218');
+    ctx.fillStyle = stageGrad;
+    ctx.fill();
+
+    ctx.save();
+    roundRect(ctx, stageX + 4, stageY + 4, stageW - 8, stageH - 8, 16);
+    ctx.clip();
+
+    ctx.strokeStyle = isRedAtk ? 'rgba(255, 110, 60, 0.16)' : 'rgba(70, 175, 255, 0.16)';
+    ctx.lineWidth = 4;
+    for (let i = 0; i < 14; i++) {
+      const ly = stageY + 20 + i * 22;
+      const offset = ((t * 900 + i * 73) % 260) - 130;
+      ctx.beginPath();
+      ctx.moveTo(stageX + offset, ly);
+      ctx.lineTo(stageX + stageW + offset, ly - 18);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = 'rgba(20, 10, 5, 0.55)';
+    ctx.beginPath();
+    ctx.moveTo(stageX, stageY + 265);
+    ctx.lineTo(stageX + 110, stageY + 195);
+    ctx.lineTo(stageX + 230, stageY + 245);
+    ctx.lineTo(stageX + 370, stageY + 180);
+    ctx.lineTo(stageX + stageW, stageY + 265);
+    ctx.closePath();
+    ctx.fill();
+
+    const floorTop = stageY + 265;
+    const floorGrad = ctx.createLinearGradient(0, floorTop, 0, stageY + stageH);
+    floorGrad.addColorStop(0, '#a67442');
+    floorGrad.addColorStop(1, '#5e3c1b');
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(stageX, floorTop, stageW, stageH - 265);
+
+    ctx.strokeStyle = 'rgba(55, 30, 12, 0.45)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(stageX, floorTop);
+    ctx.lineTo(stageX + stageW, floorTop);
+    for (let i = -3; i <= 3; i++) {
+      ctx.moveTo(LOGICAL_W / 2 + i * 55, floorTop);
+      ctx.lineTo(LOGICAL_W / 2 + i * 115, stageY + stageH);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(22, 11, 5, 0.88)';
+    ctx.fillRect(stageX, stageY, stageW, 54);
+    ctx.strokeStyle = '#d4a253';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(stageX, stageY + 54);
+    ctx.lineTo(stageX + stageW, stageY + 54);
+    ctx.stroke();
+
+    const atkTitle = `【${PIECE_LABELS[b.attacker.side][b.attacker.type]}】${PIECE_TITLES[b.attacker.type]}`;
+    const defTitle = `【${PIECE_LABELS[b.defender.side][b.defender.type]}】${PIECE_TITLES[b.defender.type]}`;
+    ctx.font = 'bold 15px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = b.attacker.side === SIDE_RED ? '#ff9478' : '#80caff';
+    drawFitText(atkTitle, stageX + 16, stageY + 27, 198);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = b.defender.side === SIDE_RED ? '#ff9478' : '#80caff';
+    drawFitText(defTitle, stageX + stageW - 16, stageY + 27, 198);
+
+    ctx.textAlign = 'center';
+    ctx.font = 'italic bold 22px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillStyle = '#ffd866';
+    ctx.fillText('VS', LOGICAL_W / 2, stageY + 28);
+
+    const baseAtkX = 148, baseAtkY = 472;
+    const baseDefX = 392, baseDefY = 472;
+    const modelScale = 2.35;
+
+    let atkX = baseAtkX, atkY = baseAtkY, atkRot = 0, atkScale = modelScale;
+    const type = b.attacker.type;
+
+    if (t < 0.24) {
+      const p = t / 0.24;
+      atkX = baseAtkX - (1 - p) * 70 + Math.sin(p * 30) * 3;
+      atkScale = modelScale * (0.9 + p * 0.15);
+    } else if (t < 0.44) {
+      const p = (t - 0.24) / 0.20;
+      if (type === 'C') {
+        atkX = baseAtkX - Math.sin(p * Math.PI) * 18;
+        atkRot = -Math.sin(p * Math.PI) * 0.12;
+      } else if (type === 'K') {
+        atkY = baseAtkY - Math.sin(p * Math.PI) * 26;
+        atkScale = modelScale * (1.05 + p * 0.2);
+      } else if (type === 'E') {
+        // 象：深吸氣後仰蓄力 -> 往前踏步伸長象鼻狂噴洪水！
+        atkX = baseAtkX + Math.sin(p * Math.PI) * 24;
+        atkY = baseAtkY - Math.sin(p * Math.PI * 2) * 10;
+        atkRot = p < 0.4 ? -0.18 : 0.08;
+        atkScale = modelScale * (1.05 + Math.sin(p * Math.PI) * 0.15);
+      } else if (type === 'H') {
+        // 馬：疾馳逼近敵人後前傾撐地，狠狠伸出長長的馬腿踢飛敵人！
+        atkX = baseAtkX + (baseDefX - baseAtkX - 78) * Math.min(1, p * 1.35);
+        atkY = baseAtkY - Math.sin(p * Math.PI) * 28;
+        atkRot = p > 0.35 ? -0.22 : 0.12;
+      } else if (type === 'R') {
+        atkX = baseAtkX + (baseDefX - baseAtkX - 25) * (p * p);
+      } else {
+        atkX = baseAtkX + (baseDefX - baseAtkX - 35) * p;
+        atkY = baseAtkY - Math.sin(p * Math.PI) * 25;
+      }
+    } else {
+      if (type === 'C' || type === 'K' || type === 'E') {
+        atkX = baseAtkX + (type === 'E' ? 14 : 0);
+        atkY = baseAtkY;
+      } else if (type === 'H') {
+        const holdP = Math.min(1, (t - 0.44) / 0.45);
+        atkX = baseDefX - 78;
+        atkY = baseDefY - (1 - holdP) * 12;
+        atkRot = (1 - holdP) * -0.22;
+      } else {
+        atkX = baseDefX - 65;
+        atkY = baseDefY;
+      }
+    }
+
+    if (t < 0.44) {
+      const panicShake = t > 0.24 ? Math.sin(t * 95) * 5 : 0;
+      drawPiece(baseDefX + panicShake, baseDefY, b.defender, modelScale, 1.0, 0, false, 0);
+    } else {
+      const dp = Math.min(1, (t - 0.44) / 0.48);
+      if (b.deathStyle === 'ASH') {
+        const shake = (1 - dp) * Math.sin(t * 90) * 7;
+        const fadeAlpha = dp < 0.35 ? 1.0 : Math.max(0, 1 - (dp - 0.35) / 0.65);
+        drawPiece(baseDefX + shake, baseDefY, b.defender, modelScale * (1 - dp * 0.12), fadeAlpha, 0, false, 1.0);
+
+      } else if (b.deathStyle === 'ROYAL_BLAST') {
+        const fadeAlpha = Math.max(0, 1 - dp * 1.15);
+        drawPiece(baseDefX + dp * 24, baseDefY - dp * 28, b.defender, modelScale * (1 + dp * 0.45), fadeAlpha, dp * 0.2, false, 0);
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, (1 - dp) * 0.85);
+        ctx.fillStyle = '#ffe066';
+        ctx.beginPath();
+        ctx.arc(baseDefX + dp * 24, baseDefY - dp * 28, 45 + dp * 55, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+      } else if (b.deathStyle === 'SLASH_SPLIT') {
+        const fadeAlpha = Math.max(0, 1 - Math.max(0, dp - 0.25) / 0.75);
+        const slide = dp * 52;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(baseDefX - 110, baseDefY - 110, 220, 102);
+        ctx.clip();
+        drawPiece(baseDefX - slide, baseDefY - slide * 0.4, b.defender, modelScale, fadeAlpha, -dp * 0.28, false, 0);
+        ctx.restore();
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(baseDefX - 110, baseDefY - 8, 220, 110);
+        ctx.clip();
+        drawPiece(baseDefX + slide, baseDefY + slide * 0.4, b.defender, modelScale, fadeAlpha, dp * 0.32, false, 0);
+        ctx.restore();
+
+      } else if (b.deathStyle === 'FLOOD_WASH') {
+        // 相/象 洪水沖飛
+        const washX = baseDefX + dp * 185;
+        const washY = baseDefY - Math.sin(dp * Math.PI * 1.5) * 42 - dp * 20;
+        const fadeAlpha = Math.max(0, 1 - Math.max(0, dp - 0.2) / 0.8);
+        drawPiece(washX, washY, b.defender, modelScale * (1 - dp * 0.25), fadeAlpha, dp * 11, false, 0);
+
+      } else if (b.deathStyle === 'KICK_FLY') {
+        // 馬/傌 伸腿踢飛
+        const kickX = baseDefX + dp * 210;
+        const kickY = baseDefY - Math.sin(dp * Math.PI * 0.78) * 175 - dp * 45;
+        const fadeAlpha = Math.max(0, 1 - Math.max(0, dp - 0.3) / 0.7);
+        drawPiece(kickX, kickY, b.defender, modelScale * (1 - dp * 0.25), fadeAlpha, dp * 20, false, 0);
+
+      } else if (b.deathStyle === 'SKEWER_FLY') {
+        const flyX = baseDefX + dp * 140;
+        const flyY = baseDefY - Math.sin(dp * Math.PI * 0.85) * 160 - dp * 40;
+        const fadeAlpha = Math.max(0, 1 - dp * 1.1);
+        drawPiece(flyX, flyY, b.defender, modelScale * (1 - dp * 0.3), fadeAlpha, dp * 18, false, 0);
+      }
+    }
+
+    if (type === 'H' && t >= 0.20 && t <= 0.58) {
+      for (let g = 1; g <= 3; g++) {
+        const ghostX = Math.max(baseAtkX, atkX - g * 38);
+        const ghostAlpha = Math.max(0, 0.42 - g * 0.11);
+        drawPiece(ghostX, baseAtkY, b.attacker, modelScale * 0.96, ghostAlpha, 0.08, false, 0);
+      }
+    }
+    drawPiece(atkX, atkY, b.attacker, atkScale, 1.0, atkRot, false, 0);
+
+    if (type === 'C') {
+      if (t >= 0.24 && t < 0.44) {
+        const p = (t - 0.24) / 0.20;
+        const bx = (atkX + 25) + (baseDefX - atkX - 25) * p;
+        const by = (atkY - 25) + (baseDefY - atkY + 15) * p - Math.sin(p * Math.PI) * 95;
+        if (p < 0.35) {
+          ctx.fillStyle = 'rgba(255, 180, 40, 0.85)';
+          ctx.beginPath();
+          ctx.arc(atkX + 20, atkY - 28, 28 * (1 - p), 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.fillStyle = '#ff5500';
+        ctx.beginPath();
+        ctx.arc(bx, by, 16, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fff7c2';
+        ctx.beginPath();
+        ctx.arc(bx, by, 8, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (t >= 0.44) {
+        const ep = Math.min(1, (t - 0.44) / 0.45);
+        ctx.strokeStyle = `rgba(255, 90, 20, ${1 - ep})`;
+        ctx.lineWidth = 14 * (1 - ep);
+        ctx.beginPath();
+        ctx.arc(baseDefX, baseDefY, 30 + ep * 110, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    } else if (type === 'K') {
+      if (t >= 0.24 && t < 0.44) {
+        const p = (t - 0.24) / 0.20;
+        const bx = (atkX + 35) + (baseDefX - atkX - 35) * p;
+        const by = atkY - 10;
+        const grad = ctx.createRadialGradient(bx, by, 5, bx, by, 42);
+        grad.addColorStop(0, '#ffffff');
+        grad.addColorStop(0.45, '#ffd43b');
+        grad.addColorStop(1, 'rgba(255, 120, 0, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(bx, by, 42, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (type === 'A' && t >= 0.42 && t < 0.78) {
+      const ep = (t - 0.42) / 0.36;
+      ctx.save();
+      ctx.translate(baseDefX, baseDefY);
+      ctx.globalAlpha = 1 - ep;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 12 * (1 - ep * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(-95, -85); ctx.lineTo(95, 85);
+      ctx.moveTo(95, -85); ctx.lineTo(-95, 85);
+      ctx.stroke();
+      ctx.restore();
+    } else if (type === 'E') {
+      // 【相/象 專屬動畫】：伸出長長的立體象鼻，從象鼻口噴出洶湧洪水狂濤衝向敵人！
+      if (t >= 0.20 && t <= 0.88) {
+        const p = Math.min(1, (t - 0.20) / 0.22);
+        const fadeOut = t > 0.74 ? Math.max(0, 1 - (t - 0.74) / 0.14) : 1.0;
+        const trunkStartX = atkX + 34;
+        const trunkStartY = atkY + 14;
+        const trunkTipX = trunkStartX + 46 * p;
+        const trunkTipY = trunkStartY - 8 * p + Math.sin(t * 32) * 3;
+
+        ctx.save();
+        ctx.globalAlpha = fadeOut;
+
+        // 1. 畫出明顯伸長的粗壯立體象鼻
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = '#6e7f8a';
+        ctx.lineWidth = 18;
+        ctx.beginPath();
+        ctx.moveTo(trunkStartX, trunkStartY);
+        ctx.bezierCurveTo(
+          trunkStartX + 18 * p, trunkStartY + 18,
+          trunkStartX + 30 * p, trunkStartY - 22,
+          trunkTipX, trunkTipY
+        );
+        ctx.stroke();
+
+        ctx.strokeStyle = '#b4c2cc';
+        ctx.lineWidth = 7;
+        ctx.beginPath();
+        ctx.moveTo(trunkStartX + 2, trunkStartY - 3);
+        ctx.bezierCurveTo(
+          trunkStartX + 18 * p, trunkStartY + 13,
+          trunkStartX + 30 * p, trunkStartY - 26,
+          trunkTipX, trunkTipY - 3
+        );
+        ctx.stroke();
+
+        ctx.fillStyle = '#3d4852';
+        ctx.beginPath();
+        ctx.ellipse(trunkTipX + 2, trunkTipY, 5, 8, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 2. 從象鼻末端噴出滔天洪水巨浪
+        if (t >= 0.30) {
+          const floodP = Math.min(1, (t - 0.30) / 0.16);
+          const waveEndX = trunkTipX + (stageX + stageW - trunkTipX) * floodP;
+          const waveY = trunkTipY + 8;
+
+          const waterGrad = ctx.createLinearGradient(trunkTipX, waveY - 35, waveEndX, waveY + 45);
+          waterGrad.addColorStop(0, 'rgba(14, 165, 233, 0.92)');
+          waterGrad.addColorStop(0.5, 'rgba(2, 132, 199, 0.88)');
+          waterGrad.addColorStop(1, 'rgba(56, 189, 248, 0.85)');
+          ctx.fillStyle = waterGrad;
+
+          ctx.beginPath();
+          ctx.moveTo(trunkTipX, trunkTipY - 7);
+          const steps = 10;
+          for (let s = 1; s <= steps; s++) {
+            const ratio = s / steps;
+            const wx = trunkTipX + (waveEndX - trunkTipX) * ratio;
+            const spread = 8 + ratio * 48;
+            const ripple = Math.sin(t * 28 - s * 1.4) * 9;
+            ctx.lineTo(wx, waveY - spread + ripple);
+          }
+          for (let s = steps; s >= 1; s--) {
+            const ratio = s / steps;
+            const wx = trunkTipX + (waveEndX - trunkTipX) * ratio;
+            const spread = 8 + ratio * 42;
+            const ripple = Math.cos(t * 24 - s * 1.3) * 6;
+            ctx.lineTo(wx, waveY + spread + ripple);
+          }
+          ctx.lineTo(trunkTipX, trunkTipY + 7);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.strokeStyle = 'rgba(224, 242, 254, 0.9)';
+          ctx.lineWidth = 12;
+          ctx.beginPath();
+          ctx.moveTo(trunkTipX, trunkTipY);
+          ctx.quadraticCurveTo(
+            (trunkTipX + waveEndX) * 0.5,
+            waveY - 12 + Math.sin(t * 35) * 6,
+            waveEndX,
+            waveY + 6
+          );
+          ctx.stroke();
+
+          for (let f = 0; f < 9; f++) {
+            const fx = trunkTipX + ((t * 520 + f * 37) % Math.max(20, waveEndX - trunkTipX));
+            const fy = waveY + Math.sin(f * 2.1 + t * 20) * 26;
+            const fr = 5 + (f % 4) * 3;
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+            ctx.beginPath();
+            ctx.arc(fx, fy, fr, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+      }
+    } else if (type === 'H') {
+      // 【馬/傌 專屬動畫】：伸出強壯馬腿與黑亮馬蹄，一腳狠狠踢飛敵人！
+      if (t >= 0.34 && t <= 0.78) {
+        const kickExtend = t < 0.44
+          ? (t - 0.34) / 0.10
+          : Math.max(0, 1 - (t - 0.44) / 0.34);
+
+        const hipX = atkX + 18;
+        const hipY = atkY + 12;
+        const footX = hipX + 68 * kickExtend;
+        const footY = hipY - 24 * kickExtend;
+
+        ctx.save();
+        if (kickExtend > 0.3) {
+          ctx.strokeStyle = `rgba(255, 230, 102, ${0.75 * kickExtend})`;
+          ctx.lineWidth = 10 * kickExtend;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.arc(hipX, hipY, 64, -0.55, 0.25);
+          ctx.stroke();
+        }
+
+        // 伸出的強壯小戰馬腿部
+        ctx.strokeStyle = '#a86f3e';
+        ctx.lineWidth = 13;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(hipX, hipY);
+        ctx.lineTo(footX, footY);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#e0a972';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(hipX + 2, hipY - 3);
+        ctx.lineTo(footX - 2, footY - 3);
+        ctx.stroke();
+
+        // 堅硬黑亮馬蹄鐵與金邊
+        ctx.save();
+        ctx.translate(footX, footY);
+        ctx.rotate(-0.35);
+        ctx.fillStyle = '#1f2429';
+        roundRect(ctx, -6, -9, 15, 18, 5);
+        ctx.fill();
+        ctx.strokeStyle = '#ffd43b';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+        ctx.restore();
+
+        if (t >= 0.42 && t <= 0.62) {
+          const hitP = (t - 0.42) / 0.20;
+          ctx.save();
+          ctx.translate(footX + 8, footY);
+          ctx.globalAlpha = 1 - hitP;
+          ctx.strokeStyle = '#fff3bf';
+          ctx.lineWidth = 6 * (1 - hitP * 0.5);
+          ctx.beginPath();
+          ctx.arc(0, 0, 18 + hitP * 48, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+        ctx.restore();
+      }
+    } else if (type === 'P' && t >= 0.38 && t < 0.72) {
+      const ep = (t - 0.38) / 0.34;
+      ctx.save();
+      ctx.translate(baseDefX, baseDefY);
+      ctx.globalAlpha = 1 - ep;
+      ctx.fillStyle = '#ffe066';
+      ctx.beginPath();
+      ctx.moveTo(-80, -14);
+      ctx.lineTo(95 + ep * 40, -25);
+      ctx.lineTo(-80, 14);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    if (t >= 0.43 && t <= 0.50) {
+      const flashAlpha = Math.sin(((t - 0.43) / 0.07) * Math.PI) * 0.55;
+      ctx.fillStyle = `rgba(255, 245, 200, ${flashAlpha})`;
+      ctx.fillRect(stageX, stageY, stageW, stageH);
+    }
+
+    ctx.restore();
+
+    roundRect(ctx, stageX, stageY, stageW, stageH, 20);
+    ctx.lineWidth = 4.5;
+    ctx.strokeStyle = '#e8b960';
+    ctx.stroke();
+
+    const bannerW = 320, bannerH = 46;
+    const bannerX = (LOGICAL_W - bannerW) / 2;
+    const bannerY = stageY + stageH - 28;
+    roundRect(ctx, bannerX, bannerY, bannerW, bannerH, 23);
+    ctx.fillStyle = '#1a0c05';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#ffd866';
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 24px "KaiTi", "DFKai-SB", "PingFang TC", serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(b.title, LOGICAL_W / 2, bannerY + bannerH / 2 + 1);
+
+    ctx.restore();
+
+    if (b.deathStyle === 'SCREEN_FLY' && t >= 0.44) {
+      const flyP = (t - 0.44) / 0.56;
+      const flyAlpha = flyP > 0.76 ? Math.max(0, 1 - (flyP - 0.76) / 0.24) : 1.0;
+      drawPiece(b.defFlyX, b.defFlyY, b.defender, b.defScale, flyAlpha, b.defRot, false, 0);
+    }
+
+    ctx.restore();
+  }
+
+  function drawDarkBoard() {
+    const pad = 20;
+    roundRect(ctx, BOARD_LEFT - pad, BOARD_TOP - pad + 7, BOARD_W + pad * 2, BOARD_H + pad * 2, 18);
+    ctx.fillStyle = '#9c7147';
+    ctx.fill();
+
+    roundRect(ctx, BOARD_LEFT - pad, BOARD_TOP - pad, BOARD_W + pad * 2, BOARD_H + pad * 2, 18);
+    const boardGrad = ctx.createLinearGradient(0, BOARD_TOP - pad, 0, BOARD_TOP + BOARD_H + pad);
+    boardGrad.addColorStop(0, '#edd1a7');
+    boardGrad.addColorStop(0.5, '#e2be8d');
+    boardGrad.addColorStop(1, '#d4ad79');
+    ctx.fillStyle = boardGrad;
+    ctx.fill();
+
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = '#b58858';
+    ctx.stroke();
+
+    ctx.strokeStyle = '#754c24';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(BOARD_LEFT - 5, BOARD_TOP - 5, BOARD_W + 10, BOARD_H + 10);
+
+    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = '#7d542d';
+    for (let r = 0; r <= ROWS; r++) {
+      const y = BOARD_TOP + r * CELL_H;
+      ctx.beginPath();
+      ctx.moveTo(BOARD_LEFT, y);
+      ctx.lineTo(BOARD_LEFT + BOARD_W, y);
+      ctx.stroke();
+    }
+    for (let c = 0; c <= COLS; c++) {
+      const x = BOARD_LEFT + c * CELL_W;
+      ctx.beginPath();
+      ctx.moveTo(x, BOARD_TOP);
+      ctx.lineTo(x, BOARD_TOP + BOARD_H);
+      ctx.stroke();
+    }
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(125, 84, 45, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(BOARD_LEFT + CELL_W, BOARD_TOP + CELL_H * 3);
+    ctx.lineTo(BOARD_LEFT + CELL_W * 3, BOARD_TOP + CELL_H * 5);
+    ctx.moveTo(BOARD_LEFT + CELL_W * 3, BOARD_TOP + CELL_H * 3);
+    ctx.lineTo(BOARD_LEFT + CELL_W, BOARD_TOP + CELL_H * 5);
+    ctx.stroke();
+    ctx.restore();
+
+    if (state.lastMove) {
+      const fPos = gridToPixel(state.lastMove.fr, state.lastMove.fc);
+      const tPos = gridToPixel(state.lastMove.tr, state.lastMove.tc);
+      ctx.strokeStyle = 'rgba(42, 130, 50, 0.85)';
+      ctx.lineWidth = 2.5;
+      if (state.lastMove.fr !== state.lastMove.tr || state.lastMove.fc !== state.lastMove.tc) {
+        ctx.strokeRect(fPos.x - 16, fPos.y - 12, 32, 24);
+      }
+      roundRect(ctx, tPos.x - 42, tPos.y - 26, 84, 52, 10);
+      ctx.stroke();
+    }
+  }
+
+  function renderPlaying() {
+    roundRect(ctx, 18, 14, LOGICAL_W - 36, 152, 14);
+    ctx.fillStyle = '#233d3b';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#82a39e';
+    ctx.stroke();
+
+    const topTitleMaxW = state.selected ? 272 : 374;
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 20px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    drawFitText('Paw & Pawn · 台灣標準暗棋', 32, 40, topTitleMaxW);
+
+    let sideInfoText = '';
+    if (!state.playerSide) {
+      if (state.firstMover === 'PLAYER') {
+        sideInfoText = state.mode === 'PVP'
+          ? '🎲 1P 猜拳勝先手（請翻開第一顆木棋決定花色！）'
+          : '🎲 您猜拳獲勝先手（請點擊任意木棋翻開決定陣營！）';
+      } else {
+        sideInfoText = state.mode === 'PVP'
+          ? '🎲 2P 猜拳勝先手（請 2P 翻開第一顆木棋決定花色！）'
+          : '🎲 電腦猜拳獲勝先手（電腦正在翻開第一顆木棋...）';
+      }
+    } else {
+      if (state.mode === 'AI') {
+        const pName = state.playerSide === SIDE_RED ? '🔴 赤虎紅貓' : '⚫ 玄豹黑貓';
+        const aName = state.aiSide === SIDE_RED ? '🔴 赤虎紅貓' : '⚫ 玄豹黑貓';
+        sideInfoText = `您執：${pName} | 電腦：${aName} | 空步：${state.idleMoves}/${MAX_IDLE_MOVES}`;
+      } else {
+        sideInfoText = `1P：${state.playerSide === SIDE_RED ? '🔴紅貓' : '⚫黑貓'} | 2P：${state.aiSide === SIDE_RED ? '🔴紅貓' : '⚫黑貓'} | 空步：${state.idleMoves}/${MAX_IDLE_MOVES}`;
+      }
+    }
+    ctx.fillStyle = '#f5e6c8';
+    ctx.font = 'bold 15px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    drawFitText(sideInfoText, 32, 74, LOGICAL_W - 64);
+
+    let turnText = '';
+    if (!state.playerSide) {
+      if (state.firstMover === 'PLAYER') {
+        turnText = state.mode === 'PVP'
+          ? '👉 先手開局：請 1P 點擊下方任意暗棋翻開！'
+          : '👉 先手開局：請點擊下方棋盤任意暗棋翻開！';
+      } else {
+        turnText = state.mode === 'PVP'
+          ? '👉 先手開局：請 2P 點擊下方任意暗棋翻開！'
+          : '🤖 電腦先手開局：電腦正在翻開第一顆暗棋...';
+      }
+    } else if (state.aiThinking) {
+      turnText = '🤖 電腦貓軍團正在思考暗棋戰術...';
+    } else {
+      const isMyTurn = (state.mode === 'PVP') || (state.turn === state.playerSide);
+      const sideLabel = state.turn === SIDE_RED ? '赤虎紅貓（紅方）' : '玄豹黑貓（黑方）';
+      turnText = isMyTurn ? `👉 輪到您出招：${sideLabel}` : `輪到對手：${sideLabel}`;
+    }
+    ctx.fillStyle = !state.playerSide ? '#ffe066' : (state.turn === SIDE_RED ? '#ff8b66' : '#7ac8ff');
+    ctx.font = 'bold 16.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    drawFitText(turnText, 32, 106, LOGICAL_W - 64);
+
+    ctx.fillStyle = '#cbe3de';
+    ctx.font = '12.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textAlign = 'left';
+    drawFitText('台灣競技階級：帥＞仕＞相＞車＞馬＞炮＞兵（兵可吃帥、兵禁吃炮、炮隔一子跳吃）', 32, 140, LOGICAL_W - 64);
+
+    if (state.selected) {
+      drawButton({
+        x: LOGICAL_W - 224,
+        y: 22,
+        w: 98,
+        h: 36,
+        r: 10,
+        label: '✖ 取消選取',
+        fontSize: 14,
+        bg1: '#78350f',
+        bg2: '#451a03',
+        action: 'DESELECT'
+      });
+    }
+
+    drawButton({
+      x: LOGICAL_W - 116,
+      y: 22,
+      w: 84,
+      h: 36,
+      r: 10,
+      label: sfx.muted ? '🔇 靜音' : '🔊 音效',
+      fontSize: 15,
+      bg1: '#4a2d1b',
+      bg2: '#2e1a0e'
+    });
+
+    drawDarkBoard();
+
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const p = state.board[r][c];
+        if (!p) continue;
+        if (state.flipAnim && state.flipAnim.r === r && state.flipAnim.c === c) continue;
+
+        const pos = gridToPixel(r, c);
+        if (!p.revealed) {
+          drawUnrevealedPiece(pos.x, pos.y, 1.05, 1.05);
+        } else {
+          const isSel = state.selected && state.selected.r === r && state.selected.c === c;
+          drawPiece(pos.x, pos.y + 2, p, 1.12, 1, 0, isSel, 0);
+        }
+      }
+    }
+
+    if (state.flipAnim) {
+      const fa = state.flipAnim;
+      const p = fa.progress;
+      if (p < 0.5) {
+        const scaleX = Math.max(0.08, Math.cos(p * Math.PI));
+        drawUnrevealedPiece(fa.x, fa.y - Math.sin(p * Math.PI) * 16, scaleX * 1.08, 1.08);
+      } else {
+        const scaleX = Math.max(0.08, Math.abs(Math.cos(p * Math.PI)));
+        ctx.save();
+        ctx.translate(fa.x, fa.y - Math.sin(p * Math.PI) * 16);
+        ctx.scale(scaleX, 1);
+        drawPiece(0, 2, fa.piece, 1.15, 1, 0, false, 0);
+        ctx.restore();
+      }
+    }
+
+    if (state.selected) {
+      const selPos = gridToPixel(state.selected.r, state.selected.c);
+      const selPiece = state.board[state.selected.r][state.selected.c];
+
+      for (const m of state.legalMoves) {
+        const pos = gridToPixel(m.tr, m.tc);
+        const target = state.board[m.tr][m.tc];
+        if (target) {
+          if (selPiece && selPiece.type === 'C') {
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255, 216, 102, 0.88)';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([6, 5]);
+            ctx.beginPath();
+            ctx.moveTo(selPos.x, selPos.y);
+            ctx.lineTo(pos.x, pos.y);
+            ctx.stroke();
+            ctx.restore();
+
+            if (m.screenPos) {
+              const sp = gridToPixel(m.screenPos.r, m.screenPos.c);
+              ctx.save();
+              roundRect(ctx, sp.x - 18, sp.y - 29, 36, 15, 6);
+              ctx.fillStyle = 'rgba(245, 158, 11, 0.92)';
+              ctx.fill();
+              ctx.fillStyle = '#1a0c05';
+              ctx.font = 'bold 10px "PingFang TC", sans-serif';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('炮架', sp.x, sp.y - 21.5);
+              ctx.restore();
+            }
+          }
+
+          ctx.save();
+          ctx.translate(pos.x, pos.y);
+          ctx.beginPath();
+          ctx.arc(0, 0, 26, 0, Math.PI * 2);
+          ctx.strokeStyle = '#ff2a1a';
+          ctx.lineWidth = 3.5;
+          ctx.stroke();
+
+          ctx.fillStyle = '#d91e18';
+          roundRect(ctx, -20, -32, 40, 17, 8);
+          ctx.fill();
+          ctx.strokeStyle = '#fff8eb';
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 11px "PingFang TC", "Microsoft JhengHei", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(selPiece && selPiece.type === 'C' ? '💥飛炮' : '⚔️可吃', 0, -23.5);
+          ctx.restore();
+        } else {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, 10, 0, Math.PI * 2);
+          ctx.fillStyle = '#22b549';
+          ctx.fill();
+          ctx.lineWidth = 2.4;
+          ctx.strokeStyle = '#fffdf7';
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
+    if (state.moveAnim) {
+      const m = state.moveAnim;
+      const ease = 1 - Math.pow(1 - m.progress, 3);
+      const curX = m.startX + (m.targetX - m.startX) * ease;
+      const curY = m.startY + (m.targetY - m.startY) * ease - Math.sin(m.progress * Math.PI) * 14;
+      drawPiece(curX, curY, m.piece, 1.18, 1, 0, false, 0);
+    }
+
+    roundRect(ctx, 18, 738, LOGICAL_W - 36, 204, 14);
+    ctx.fillStyle = '#233d3b';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#82a39e';
+    ctx.stroke();
+
+    const redLeft = countRemainingPieces(state.board, SIDE_RED);
+    const blkLeft = countRemainingPieces(state.board, SIDE_BLACK);
+    const darkLeft = countUnrevealedPieces(state.board);
+
+    ctx.textAlign = 'left';
+    ctx.font = '14.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillStyle = '#ff9988';
+    const redLine = formatCapturedList(`🔴 紅方戰果(黑餘${blkLeft})：`, state.capturedByRed, 350);
+    drawFitText(redLine, 32, 768, 350);
+
+    ctx.fillStyle = '#88c9ff';
+    const blkLine = formatCapturedList(`⚫ 黑方戰果(紅餘${redLeft})：`, state.capturedByBlack, 350);
+    drawFitText(blkLine, 32, 798, 350);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 13.5px "PingFang TC", sans-serif';
+    drawFitText(`未翻暗棋：${darkLeft}顆`, LOGICAL_W - 32, 768, 118);
+    ctx.fillStyle = '#cbe3de';
+    drawFitText(`第 ${state.turnCount} 回合`, LOGICAL_W - 32, 798, 118);
+
+    const btnY = 834;
+    const btnW = 148;
+    const btnH = 48;
+    drawButton({
+      x: 34, y: btnY, w: btnW, h: btnH, r: 10,
+      label: '↩ 悔棋一步',
+      fontSize: 17,
+      bg1: state.history.length > 0 ? '#3a5a40' : '#3a3532',
+      bg2: state.history.length > 0 ? '#233827' : '#24201e',
+      action: 'UNDO'
+    });
+    drawButton({
+      x: 196, y: btnY, w: btnW, h: btnH, r: 10,
+      label: '🔄 重新猜拳',
+      fontSize: 17,
+      bg1: '#7a4b1e',
+      bg2: '#4d2d10',
+      action: 'RESTART'
+    });
+    drawButton({
+      x: 358, y: btnY, w: btnW, h: btnH, r: 10,
+      label: '🏠 主選單',
+      fontSize: 17,
+      bg1: '#6e231c',
+      bg2: '#45130e',
+      action: 'MENU'
+    });
+
+    ctx.fillStyle = '#bfa682';
+    ctx.font = '13.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('台灣標準競技規則：兵不可吃炮 · 炮隔一子跳吃明棋 · 滿50空步判和局', LOGICAL_W / 2, 914);
+
+    if (state.battleAnim) {
+      renderBattleCutscene(state.battleAnim);
+    }
+  }
+
+  function renderMenu() {
+    roundRect(ctx, 32, 56, LOGICAL_W - 64, LOGICAL_H - 112, 22);
+    const grad = ctx.createLinearGradient(0, 56, 0, LOGICAL_H - 56);
+    grad.addColorStop(0, '#361f12');
+    grad.addColorStop(0.5, '#26140b');
+    grad.addColorStop(1, '#1c0e07');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#d4a253';
+    ctx.stroke();
+
+    drawUnrevealedPiece(LOGICAL_W / 2 - 118, 174, 1.25, 1.25);
+    drawPiece(LOGICAL_W / 2, 158, { side: SIDE_RED, type: 'K', revealed: true }, 1.65);
+    drawPiece(LOGICAL_W / 2 + 115, 168, { side: SIDE_BLACK, type: 'C', revealed: true }, 1.45);
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 52px "KaiTi", "DFKai-SB", "Microsoft JhengHei", serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('楚漢暗棋演武', LOGICAL_W / 2, 262);
+
+    ctx.fillStyle = '#f5be4f';
+    ctx.font = 'bold 17px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText('Paw & Pawn: Dark Chess', LOGICAL_W / 2, 300);
+
+    ctx.fillStyle = '#e8c996';
+    ctx.font = 'bold 18px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText('台灣官方標準 4×8 暗棋競技 · 3D 貓咪武將對決', LOGICAL_W / 2, 330);
+
+    roundRect(ctx, 110, 356, LOGICAL_W - 220, 44, 22);
+    ctx.fillStyle = 'rgba(212, 162, 83, 0.16)';
+    ctx.fill();
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 18px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(`最高戰功紀錄：${state.bestScore}`, LOGICAL_W / 2, 378);
+
+    drawButton({
+      x: 85, y: 435, w: LOGICAL_W - 170, h: 64, r: 16,
+      label: '🎲 單人暗棋（初學演武）',
+      fontSize: 22,
+      bg1: '#a3281d',
+      bg2: '#69150e',
+      action: 'START_NORMAL'
+    });
+
+    drawButton({
+      x: 85, y: 520, w: LOGICAL_W - 170, h: 64, r: 16,
+      label: '🔥 單人暗棋（宗師對決）',
+      fontSize: 22,
+      bg1: '#8f4719',
+      bg2: '#59290b',
+      action: 'START_HARD'
+    });
+
+    drawButton({
+      x: 85, y: 605, w: LOGICAL_W - 170, h: 64, r: 16,
+      label: '👥 雙人同機暗棋對弈',
+      fontSize: 22,
+      bg1: '#2b5943',
+      bg2: '#193829',
+      action: 'START_PVP'
+    });
+
+    drawButton({
+      x: 85, y: 690, w: 175, h: 54, r: 14,
+      label: '📜 台灣競技規則',
+      fontSize: 18,
+      bg1: '#4d3624',
+      bg2: '#302014',
+      action: 'HELP'
+    });
+
+    drawButton({
+      x: LOGICAL_W - 260, y: 690, w: 175, h: 54, r: 14,
+      label: sfx.muted ? '🔇 音效：關' : '🔊 音效：開',
+      fontSize: 18,
+      bg1: '#4d3624',
+      bg2: '#302014',
+      action: 'MUTE'
+    });
+
+    ctx.fillStyle = '#9e825c';
+    ctx.font = '15px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText('猜拳定先後 · 炮隔一子跳吃 · 兵不可吃炮 · 50空步判和', LOGICAL_W / 2, 805);
+  }
+
+  function renderHelp() {
+    roundRect(ctx, 26, 38, LOGICAL_W - 52, LOGICAL_H - 76, 20);
+    ctx.fillStyle = '#29170d';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#d4a253';
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 26px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('📜 台灣暗棋（半棋）官方標準競技規則', LOGICAL_W / 2, 80);
+
+    const roster = [
+      { type: 'K', side: SIDE_RED, desc: '帥/將 (Lv.7)：可吃帥、仕、相、車、馬、炮；不可吃兵/卒！' },
+      { type: 'A', side: SIDE_RED, desc: '仕/士 (Lv.6)：可吃仕、相、車、馬、炮、兵。' },
+      { type: 'E', side: SIDE_BLACK, desc: '相/象 (Lv.5)：可吃相、車、馬、炮、兵。' },
+      { type: 'R', side: SIDE_RED, desc: '俥/車 (Lv.4)：可吃車、馬、炮、兵（一步一格）。' },
+      { type: 'H', side: SIDE_RED, desc: '傌/馬 (Lv.3)：可吃馬、炮、兵（一步一格，不走日）。' },
+      { type: 'C', side: SIDE_BLACK, desc: '炮/包 (Lv.2)：走鄰格空地；吃子須隔一棋跳吃任意明棋！' },
+      { type: 'P', side: SIDE_BLACK, desc: '兵/卒 (Lv.1)：可吃敵方【帥/將】與兵/卒；不可吃炮/包！' }
+    ];
+
+    let y = 132;
+    for (const item of roster) {
+      drawPiece(70, y, { side: item.side, type: item.type, revealed: true }, 0.88);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#f5e6c8';
+      ctx.font = 'bold 14.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      drawFitText(item.desc, 108, y + 4, LOGICAL_W - 148);
+      y += 54;
+    }
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 18px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText('【台灣標準競技判例與和局條款】', 46, y + 12);
+
+    const helpMaxW = LOGICAL_W - 92;
+    ctx.fillStyle = '#e8d5b7';
+    ctx.font = '14px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    drawFitText('1. 猜拳與定色：開局猜拳勝者先翻棋，首翻花色即為先手方陣營。', 46, y + 40, helpMaxW);
+    drawFitText('2. 飛炮與炮架：炮/包隔一顆棋（明棋或暗棋皆可）直線跳吃已翻開敵棋。', 46, y + 66, helpMaxW);
+    drawFitText('3. 殲滅與困斃：吃光對手16子獲勝；對手無棋可翻且無步可走亦獲勝。', 46, y + 92, helpMaxW);
+    drawFitText('4. 50步空步和局：連續 50 步無翻棋且無吃子，自動判為【和局】。', 46, y + 118, helpMaxW);
+    drawFitText('5. 禁止長捉：同一棋子禁止連續追捉同一敵棋超過 5 次。', 46, y + 144, helpMaxW);
+
+    drawButton({
+      x: 110, y: 824, w: LOGICAL_W - 220, h: 56, r: 15,
+      label: '返回主選單',
+      fontSize: 21,
+      action: 'MENU'
+    });
+  }
+
+  function renderGameOverOverlay() {
+    ctx.fillStyle = 'rgba(12, 6, 3, 0.78)';
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    roundRect(ctx, 44, 230, LOGICAL_W - 88, 470, 22);
+    const grad = ctx.createLinearGradient(0, 230, 0, 700);
+    grad.addColorStop(0, '#3b2113');
+    grad.addColorStop(1, '#211109');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#ffd866';
+    ctx.stroke();
+
+    const isDraw = state.winner === 'DRAW';
+    const isRedWin = state.winner === SIDE_RED;
+    ctx.fillStyle = isDraw ? '#ffb870' : (isRedWin ? '#ffd866' : '#80caff');
+    ctx.font = 'bold 40px "KaiTi", "DFKai-SB", "Microsoft JhengHei", serif';
+    ctx.textAlign = 'center';
+    const titleText = isDraw ? '雙方握手言和！' : (isRedWin ? '赤虎紅貓軍凱旋！' : '玄豹黑貓軍制勝！');
+    ctx.fillText(titleText, LOGICAL_W / 2, 305);
+
+    ctx.fillStyle = '#f5e6c8';
+    ctx.font = 'bold 17px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    drawFitText(state.winReason, LOGICAL_W / 2, 365, LOGICAL_W - 120);
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 26px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(`本局戰功：${state.score}`, LOGICAL_W / 2, 430);
+
+    ctx.fillStyle = '#d4b483';
+    ctx.font = '19px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(`總回合數：${state.turnCount}  |  最高紀錄：${state.bestScore}`, LOGICAL_W / 2, 475);
+
+    drawButton({
+      x: 95, y: 530, w: LOGICAL_W - 190, h: 62, r: 16,
+      label: '🎲 再玩一局（重新猜拳）',
+      fontSize: 22,
+      bg1: '#a3281d',
+      bg2: '#69150e',
+      action: 'RESTART'
+    });
+
+    drawButton({
+      x: 95, y: 610, w: LOGICAL_W - 190, h: 54, r: 14,
+      label: '返回主選單',
+      fontSize: 20,
+      bg1: '#4d3624',
+      bg2: '#302014',
+      action: 'MENU'
+    });
+  }
+
+  // =========================================================================
+  // 6. 遊戲主迴圈與動畫更新
+  // =========================================================================
+  let lastTime = performance.now();
+
+  function update(dt) {
+    state.animClock += dt;
+
+    if (state.screenShake > 0) {
+      state.screenShake = Math.max(0, state.screenShake - dt * 35);
+    }
+
+    if (state.screen === 'RPS') {
+      if (state.rps.phase === 'ANIM') {
+        state.rps.timer -= dt;
+        if (state.rps.timer <= 0) {
+          state.rps.phase = 'RESULT';
+          state.rps.timer = state.rps.result === 'DRAW' ? 1.15 : 1.35;
+          sfx.playRpsResult(state.rps.result);
+          if (state.rps.result === 'WIN') {
+            spawnParticles(150, 430, '#ffe066', 26, 6);
+          } else if (state.rps.result === 'LOSE') {
+            spawnParticles(LOGICAL_W - 150, 430, '#80caff', 26, 6);
+          }
+        }
+      } else if (state.rps.phase === 'RESULT') {
+        state.rps.timer -= dt;
+        if (state.rps.timer <= 0) {
+          if (state.rps.result === 'DRAW') {
+            state.rps.phase = 'CHOOSE';
+            state.rps.playerChoice = null;
+            state.rps.aiChoice = null;
+            state.rps.result = null;
+            state.rps.round++;
+          } else {
+            enterBoardAfterRps();
+          }
+        }
+      }
+    }
+
+    if (state.flipAnim) {
+      state.flipAnim.progress += dt / state.flipAnim.duration;
+      if (state.flipAnim.progress >= 1) {
+        const { r, c } = state.flipAnim;
+        state.flipAnim = null;
+        finalizeFlip(r, c);
+      }
+    }
+
+    if (state.moveAnim) {
+      state.moveAnim.progress += dt / state.moveAnim.duration;
+      if (state.moveAnim.progress >= 1) {
+        const { move, piece } = state.moveAnim;
+        state.moveAnim = null;
+        finalizeMove(move, piece, null);
+      }
+    }
+
+    if (state.battleAnim) {
+      const b = state.battleAnim;
+      b.progress += dt / b.duration;
+
+      if (b.progress >= 0.44 && !b.hitTriggered) {
+        b.hitTriggered = true;
+        state.screenShake = (b.deathStyle === 'SCREEN_FLY' || b.deathStyle === 'FLOOD_WASH') ? 17 : 13;
+        const hitX = 392, hitY = 472;
+
+        if (b.deathStyle === 'ASH') {
+          spawnParticles(hitX, hitY, '#ff6b1a', 34, 7.5);
+          spawnAshParticles(hitX, hitY, 85);
+        } else if (b.deathStyle === 'SCREEN_FLY') {
+          spawnParticles(hitX, hitY, '#ffbe3b', 36, 8.5);
+          spawnParticles(hitX, hitY, '#ff4d36', 24, 7.0);
+        } else if (b.deathStyle === 'ROYAL_BLAST') {
+          spawnParticles(hitX, hitY, '#ffd43b', 45, 8.0);
+          spawnParticles(hitX, hitY, '#fff9c4', 28, 5.5);
+        } else if (b.deathStyle === 'SLASH_SPLIT') {
+          spawnParticles(hitX, hitY, '#e0f2fe', 34, 8.0);
+          spawnParticles(hitX, hitY, '#ffd43b', 20, 5.5);
+        } else if (b.deathStyle === 'FLOOD_WASH') {
+          spawnParticles(hitX, hitY, '#38bdf8', 38, 8.0);
+          spawnParticles(hitX, hitY, '#ffffff', 28, 6.5);
+        } else if (b.deathStyle === 'KICK_FLY') {
+          spawnParticles(hitX, hitY, '#ffe066', 36, 8.5);
+          spawnParticles(hitX, hitY, '#ff6b35', 22, 7.0);
+        } else {
+          const color = b.attacker.side === SIDE_RED ? '#ff6b35' : '#4cc9f0';
+          spawnParticles(hitX, hitY, color, 32, 7.5);
+        }
+      }
+
+      if (b.progress >= 0.44 && b.deathStyle === 'SCREEN_FLY') {
+        const flyP = (b.progress - 0.44) / 0.56;
+        b.defScale = 2.35 + Math.pow(flyP, 1.4) * 5.8;
+        b.defFlyX = 392 - flyP * 110;
+        b.defFlyY = 472 + flyP * 160;
+        b.defRot += 0.22;
+      }
+
+      if (b.progress >= 1) {
+        const { move, attacker, defender } = b;
+        state.battleAnim = null;
+        finalizeMove(move, attacker, defender);
+      }
+    }
+
+    if (state.aiThinking && !state.flipAnim && !state.moveAnim && !state.battleAnim && state.screen === 'PLAYING') {
+      state.aiTimer -= dt;
+      if (state.aiTimer <= 0) {
+        state.aiThinking = false;
+        const aiAct = getBestAIDarkAction(state.board, state.aiSide, state.difficulty);
+        if (aiAct) {
+          if (aiAct.type === 'FLIP') {
+            executeFlip(aiAct.r, aiAct.c);
+          } else {
+            executeMove(aiAct);
+          }
+        }
+      }
+    }
+
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.18;
+      p.life -= p.decay;
+      if (p.life <= 0) state.particles.splice(i, 1);
+    }
+
+    for (let i = state.ashParticles.length - 1; i >= 0; i--) {
+      const ap = state.ashParticles[i];
+      ap.wobble += 0.14;
+      ap.x += ap.vx + Math.sin(ap.wobble) * 0.85;
+      ap.y += ap.vy;
+      ap.life -= ap.decay;
+      if (ap.life <= 0) state.ashParticles.splice(i, 1);
+    }
+
+    for (let i = state.floatingTexts.length - 1; i >= 0; i--) {
+      const ft = state.floatingTexts[i];
+      ft.y += ft.vy;
+      ft.life -= ft.decay;
+      if (ft.life <= 0) state.floatingTexts.splice(i, 1);
+    }
+  }
+
+  function render() {
+    state.uiButtons = [];
+    ctx.save();
+    ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    ctx.fillStyle = '#ebd9c5';
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    if (state.screenShake > 0) {
+      const sx = (Math.random() - 0.5) * state.screenShake;
+      const sy = (Math.random() - 0.5) * state.screenShake;
+      ctx.translate(sx, sy);
+    }
+
+    if (state.screen === 'MENU') {
+      renderMenu();
+    } else if (state.screen === 'HELP') {
+      renderHelp();
+    } else if (state.screen === 'RPS') {
+      renderRpsScreen();
+    } else if (state.screen === 'PLAYING' || state.screen === 'GAMEOVER') {
+      renderPlaying();
+      if (state.screen === 'GAMEOVER') {
+        renderGameOverOverlay();
+      }
+    }
+
+    for (const ap of state.ashParticles) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, ap.life);
+      ctx.fillStyle = `rgb(${ap.shade}, ${ap.shade}, ${ap.shade})`;
+      ctx.beginPath();
+      ctx.ellipse(ap.x, ap.y, ap.size, ap.size * 0.6, ap.wobble, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    for (const p of state.particles) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    for (const ft of state.floatingTexts) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, ft.life);
+      ctx.font = `bold ${ft.size}px "PingFang TC", "Microsoft JhengHei", sans-serif`;
+      ctx.textAlign = 'center';
+      const maxW = LOGICAL_W - 36;
+      const measuredW = Math.min(maxW, ctx.measureText(ft.text).width);
+      const safeX = Math.max(18 + measuredW / 2, Math.min(LOGICAL_W - 18 - measuredW / 2, ft.x));
+      const safeY = Math.max(36, Math.min(LOGICAL_H - 36, ft.y));
+      ctx.strokeStyle = '#1a0a04';
+      ctx.lineWidth = 4;
+      ctx.strokeText(ft.text, safeX, safeY, maxW);
+      ctx.fillStyle = ft.color;
+      ctx.fillText(ft.text, safeX, safeY, maxW);
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  function loop(now) {
+    const dt = Math.min(0.05, (now - lastTime) / 1000);
+    lastTime = now;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // =========================================================================
+  // 7. Pointer 觸控與滑鼠點擊事件處理
+  // =========================================================================
+  function getLogicalPoint(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = LOGICAL_W / rect.width;
+    const scaleY = LOGICAL_H / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY
+    };
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    sfx.unlock();
+    const pt = getLogicalPoint(e);
+
+    for (let i = state.uiButtons.length - 1; i >= 0; i--) {
+      const btn = state.uiButtons[i];
+      if (pt.x >= btn.x && pt.x <= btn.x + btn.w && pt.y >= btn.y && pt.y <= btn.y + btn.h) {
+        if (btn.label.includes('音效') || btn.action === 'MUTE') {
+          sfx.toggleMute();
+          if (!sfx.muted) sfx.playSelect();
+          return;
+        }
+        if (btn.action === 'DESELECT') {
+          state.selected = null;
+          state.legalMoves = [];
+          sfx.playCancel();
+          return;
+        }
+        if (btn.action === 'RPS_SCISSORS') {
+          startRpsShowdown('SCISSORS');
+          return;
+        }
+        if (btn.action === 'RPS_ROCK') {
+          startRpsShowdown('ROCK');
+          return;
+        }
+        if (btn.action === 'RPS_PAPER') {
+          startRpsShowdown('PAPER');
+          return;
+        }
+
+        sfx.playSelect();
+        if (btn.action === 'START_NORMAL') resetGame('AI', 'normal');
+        else if (btn.action === 'START_HARD') resetGame('AI', 'hard');
+        else if (btn.action === 'START_PVP') resetGame('PVP', 'normal');
+        else if (btn.action === 'HELP') state.screen = 'HELP';
+        else if (btn.action === 'MENU') state.screen = 'MENU';
+        else if (btn.action === 'RESTART') resetGame(state.mode, state.difficulty);
+        else if (btn.action === 'UNDO') handleUndo();
+        return;
+      }
+    }
+
+    if (state.screen !== 'PLAYING') return;
+    if (state.flipAnim || state.moveAnim || state.battleAnim || state.aiThinking) return;
+    if (state.mode === 'AI' && !state.playerSide && state.firstMover === 'OPPONENT') return;
+    if (state.mode === 'AI' && state.playerSide && state.turn !== state.playerSide) return;
+
+    const cell = pixelToGrid(pt.x, pt.y);
+
+    if (!cell) {
+      if (state.selected) {
+        state.selected = null;
+        state.legalMoves = [];
+        sfx.playCancel();
+      }
+      return;
+    }
+
+    const clickedPiece = state.board[cell.r][cell.c];
+
+    if (state.selected) {
+      if (state.selected.r === cell.r && state.selected.c === cell.c) {
+        state.selected = null;
+        state.legalMoves = [];
+        sfx.playCancel();
+        return;
+      }
+
+      const chosenMove = state.legalMoves.find(m => m.tr === cell.r && m.tc === cell.c);
+      if (chosenMove) {
+        executeMove(chosenMove);
+        return;
+      }
+
+      if (clickedPiece && clickedPiece.revealed && clickedPiece.side === state.turn) {
+        state.selected = { r: cell.r, c: cell.c };
+        state.legalMoves = getLegalMovesForPiece(state.board, cell.r, cell.c);
+        sfx.playSelect();
+        return;
+      }
+
+      if (clickedPiece && !clickedPiece.revealed) {
+        const selPiece = state.board[state.selected.r][state.selected.c];
+        if (selPiece && selPiece.type === 'C') {
+          sfx.playInvalid();
+          const pos = gridToPixel(cell.r, cell.c);
+          spawnFloatingText(LOGICAL_W / 2, pos.y - 24, '⚠️ 台灣標準規則：炮/包不可盲吃暗棋！已取消選取，再點一次可翻開', '#ffe066', 15.5);
+          state.selected = null;
+          state.legalMoves = [];
+          return;
+        }
+        state.selected = null;
+        state.legalMoves = [];
+        sfx.playCancel();
+        const pos = gridToPixel(cell.r, cell.c);
+        spawnFloatingText(pos.x, pos.y - 22, '已取消選取，再點一次即可翻開暗棋', '#ffe066', 16);
+        return;
+      }
+
+      if (clickedPiece && clickedPiece.revealed && clickedPiece.side !== state.turn) {
+        sfx.playInvalid();
+        const reason = getCannotCaptureReason(state.board, state.selected.r, state.selected.c, cell.r, cell.c);
+        const pos = gridToPixel(cell.r, cell.c);
+        spawnFloatingText(LOGICAL_W / 2, pos.y - 24, reason, '#ff6b6b', 16);
+        return;
+      }
+
+      const rawWithoutChase = getLegalMovesForPiece(state.board, state.selected.r, state.selected.c, false);
+      const blockedByChase = rawWithoutChase.find(m => m.tr === cell.r && m.tc === cell.c);
+      if (blockedByChase) {
+        sfx.playInvalid();
+        const pos = gridToPixel(cell.r, cell.c);
+        spawnFloatingText(LOGICAL_W / 2, pos.y - 24, '⚠️ 台灣競技規則：禁止長捉（已連續追捉同一敵棋達5次）！', '#ff6b6b', 16);
+        return;
+      }
+
+      state.selected = null;
+      state.legalMoves = [];
+      sfx.playCancel();
+      return;
+    }
+
+    if (!clickedPiece) return;
+
+    if (!clickedPiece.revealed) {
+      executeFlip(cell.r, cell.c);
+      return;
+    }
+
+    if (clickedPiece.side === state.turn) {
+      state.selected = { r: cell.r, c: cell.c };
+      state.legalMoves = getLegalMovesForPiece(state.board, cell.r, cell.c);
+      sfx.playSelect();
+    } else {
+      sfx.playCancel();
+      const pos = gridToPixel(cell.r, cell.c);
+      const enemyArmy = clickedPiece.side === SIDE_RED ? '紅方' : '黑方';
+      spawnFloatingText(pos.x, pos.y - 24, `這是對手（${enemyArmy}）的棋子`, '#ff8b66', 16);
+    }
+  });
+})();
+</script>
+</body>
+</html>
